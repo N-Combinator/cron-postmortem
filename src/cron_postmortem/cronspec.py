@@ -34,6 +34,11 @@ MACROS = {
 # Schedules that exist but can never be predicted from a calendar.
 UNPREDICTABLE_MACROS = {"@reboot"}
 
+# The same safeguard calendarspec has: enumerating every minute of a year helps
+# nobody and eats the process.  A cron field tops out at 1440 firings a day, so
+# this only bites on a window of several months.
+MAX_OCCURRENCES = 200_000
+
 _FIELD_RE = re.compile(r"^(?P<range>[^/]+)(?:/(?P<step>\d+))?$")
 
 
@@ -68,6 +73,12 @@ class CronSchedule:
         """Every firing time in the closed interval [start, end]."""
         if end < start:
             return []
+        per_day = len(self.hours) * len(self.minutes)
+        span_days = (end.date() - start.date()).days + 1
+        if per_day * span_days > MAX_OCCURRENCES:
+            raise CronParseError(
+                "schedule fires too often to enumerate over the requested window"
+            )
         out: list[datetime] = []
         hours = sorted(self.hours)
         minutes = sorted(self.minutes)

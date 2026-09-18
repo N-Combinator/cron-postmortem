@@ -93,3 +93,13 @@ def test_starred_day_of_month_step_ands_with_day_of_week():
     schedule = cronspec.parse("0 0 */2 * fri")
     days = schedule.occurrences(datetime(2026, 9, 1), datetime(2026, 9, 30, 23, 59))
     assert [moment.day for moment in days] == [11, 25]
+
+
+def test_an_enormous_window_is_refused_rather_than_enumerated():
+    # `* * * * *` over a decade is 5.2M datetimes; the same safeguard
+    # calendarspec has keeps a bad --since from eating the process.
+    schedule = cronspec.parse("* * * * *")
+    with pytest.raises(cronspec.CronParseError, match="too often"):
+        schedule.occurrences(datetime(2016, 1, 1), datetime(2026, 1, 1))
+    # A month of every-minute runs is still well inside the cap.
+    assert len(schedule.occurrences(datetime(2026, 9, 1), datetime(2026, 9, 30, 23, 59))) == 43200
