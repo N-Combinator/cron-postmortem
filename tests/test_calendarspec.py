@@ -44,10 +44,22 @@ def test_weekday_range_wraps():
     assert schedule.weekdays == frozenset({4, 5, 6, 0})
 
 
-def test_timezone_suffix_is_recorded_not_applied():
-    schedule = calendarspec.parse("*-*-* 03:00:00 Europe/Berlin")
-    assert schedule.timezone == "Europe/Berlin"
-    assert schedule.occurrences(DAY_START, DAY_END)[0] == datetime(2026, 9, 17, 3)
+@pytest.mark.parametrize(
+    "expression",
+    ["*-*-* 03:00:00 Europe/Berlin", "Mon *-*-* 09:00:00 UTC", "daily UTC"],
+)
+def test_a_timezone_suffix_is_refused_rather_than_evaluated_locally(expression):
+    # Silently building naive local occurrences from a foreign zone reports a
+    # healthy timer as missed by the offset between the two zones.
+    with pytest.raises(calendarspec.UnsupportedTimezoneError) as excinfo:
+        calendarspec.parse(expression)
+    assert "not supported" in str(excinfo.value)
+
+
+def test_the_refusal_is_a_parse_error_so_callers_report_a_coverage_gap():
+    assert issubclass(
+        calendarspec.UnsupportedTimezoneError, calendarspec.CalendarParseError
+    )
 
 
 def test_minutely_shorthand():

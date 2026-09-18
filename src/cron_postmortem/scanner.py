@@ -179,6 +179,7 @@ def scan(options: ScanOptions) -> ScanResult:
             state=states_by_id.get(job.unit or ""),
             timer_state=states_by_id.get(job.timer or ""),
             diagnostics=diagnostics,
+            warnings=warnings,
         )
         job_reports.append(report)
         findings.extend(report.findings)
@@ -522,6 +523,7 @@ def _analyse_job(
     state: systemd.UnitState | None,
     timer_state: systemd.UnitState | None,
     diagnostics: list[Diagnostic],
+    warnings: list[ScanWarning],
 ) -> JobReport:
     tolerance = options.tolerance
     if job.source == SYSTEMD and timer_state is not None:
@@ -549,6 +551,19 @@ def _analyse_job(
                     job.id, f"schedule {expression!r} not analysable: {exc}", job.origin
                 )
             )
+            if isinstance(exc, calendarspec.UnsupportedTimezoneError):
+                # Not just a coverage gap: the timer looks checked in the job
+                # table (zero expected, zero missed) while nothing about its
+                # schedule was verified, so say it out loud and exit non-zero.
+                warnings.append(
+                    ScanWarning(
+                        "unsupported-timezone",
+                        f"{job.id}: OnCalendar={expression!r} names a timezone, "
+                        "which is not supported - the timer is excluded from "
+                        "missed-run detection (overlaps and failures are still "
+                        "reported)",
+                    )
+                )
     occurrences = sorted(moments)
 
     findings: list[Finding] = []

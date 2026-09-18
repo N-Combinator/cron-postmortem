@@ -2,8 +2,9 @@
 
 Covers the subset that real timer units use: the shorthands, weekday filters,
 ``*``/lists/``a..b`` ranges and ``/step`` repetitions.  Anything outside that subset
-raises :class:`CalendarParseError` so the caller can report it as a coverage gap
-instead of silently pretending the timer was checked.
+- including a trailing timezone - raises :class:`CalendarParseError` so the caller
+can report it as a coverage gap instead of silently pretending the timer was
+checked.
 """
 
 from __future__ import annotations
@@ -46,6 +47,18 @@ class CalendarParseError(ValueError):
     """Raised when an ``OnCalendar=`` expression cannot be understood."""
 
 
+class UnsupportedTimezoneError(CalendarParseError):
+    """Raised for an ``OnCalendar=`` value that names a timezone.
+
+    Every timestamp in this tool is naive local wall-clock time, because that is
+    what cron, systemd timers and the logs they leave behind all work in.  A
+    schedule in another zone would have to be converted through the zone of
+    whatever machine happens to run the scan, which is not necessarily the
+    machine the log came from, so the expression is refused instead of being
+    quietly evaluated in the wrong zone.
+    """
+
+
 @dataclass(frozen=True)
 class CalendarSchedule:
     """``None`` for a component means "any value" (the ``*`` wildcard)."""
@@ -57,7 +70,6 @@ class CalendarSchedule:
     hours: frozenset[int]
     minutes: frozenset[int]
     seconds: frozenset[int]
-    timezone: str | None = None
 
     def matches_day(self, day: date) -> bool:
         if self.weekdays is not None and day.weekday() not in self.weekdays:
@@ -197,9 +209,11 @@ def parse(expression: str) -> CalendarSchedule:
         raise CalendarParseError("per-second schedules are not supported")
 
     tokens = text.split()
-    timezone = None
     if len(tokens) > 1 and _TZ_RE.match(tokens[-1]):
-        timezone = tokens.pop()
+        raise UnsupportedTimezoneError(
+            f"timezone {tokens[-1]!r} is not supported: schedules and log "
+            "timestamps are compared as local wall-clock time"
+        )
 
     weekdays: frozenset[int] | None = None
     if tokens and _looks_like_weekdays(tokens[0]):
@@ -249,5 +263,4 @@ def parse(expression: str) -> CalendarSchedule:
         seconds=frozenset(range(60)) if seconds is None else frozenset(
             s for s in seconds if s < 60
         ),
-        timezone=timezone,
     )

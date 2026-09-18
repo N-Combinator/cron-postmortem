@@ -117,3 +117,20 @@ def test_discovery_collects_readable_files(monkeypatch, tmp_path):
     found, problems = crontab.discover_crontab_files()
     assert found == [spool / "root"]
     assert problems == []
+
+
+def test_cron_tz_is_reported_rather_than_silently_ignored():
+    jobs, problems = crontab.parse_crontab(
+        "CRON_TZ=Europe/Berlin\n0 3 * * * /bin/true\n", "u", False, "root"
+    )
+    assert len(jobs) == 1
+    assert problems == [
+        "u:1: CRON_TZ= is not applied; the entries below it are analysed in local time"
+    ]
+
+
+def test_ordinary_environment_lines_stay_quiet():
+    _, problems = crontab.parse_crontab(
+        "MAILTO=ops@example.com\nPATH=/usr/bin\n0 3 * * * /bin/true\n", "u", False, "root"
+    )
+    assert problems == []

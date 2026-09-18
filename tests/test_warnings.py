@@ -175,3 +175,62 @@ def test_a_healthy_scan_stays_quiet_and_exits_zero(tmp_path, capsys):
     assert code == cli.EXIT_OK
     assert "## Warnings" not in out
     assert "No problems found." in out
+
+
+TIMER_SHOW = """\
+Id=report.timer
+Description=Report timer
+LoadState=loaded
+ActiveState=active
+SubState=waiting
+Unit=report.service
+AccuracyUSec=1min
+RandomizedDelayUSec=0
+TimersCalendar={ OnCalendar=*-*-* 09:00:00 Europe/Berlin ; next_elapse=n/a }
+
+Id=report.service
+Description=Report
+LoadState=loaded
+ActiveState=inactive
+SubState=dead
+Result=success
+ExecMainStatus=0
+Type=oneshot
+"""
+
+
+def test_a_timezone_qualified_timer_warns_instead_of_being_checked_wrong(tmp_path):
+    show = tmp_path / "show.txt"
+    show.write_text(TIMER_SHOW)
+    log = tmp_path / "journal.log"
+    log.write_text(HEALTHY_LOG)
+
+    result = scan(ScanOptions(show_paths=[show], log_paths=[log], now=NOW))
+
+    report = result.job_reports[0]
+    # Evaluating the expression as local time would have expected a run at 09:00
+    # local and reported the timer as missed; instead nothing is claimed about it.
+    assert report.expected == 0
+    assert report.schedule_ok is False
+    assert result.problems == 0
+
+    assert codes(result) == ["unsupported-timezone"]
+    assert result.alerts is True
+    warning = result.warnings[0]
+    assert "systemd:report.timer" in warning.message
+    assert "Europe/Berlin" in warning.message
+    assert any(
+        "not analysable" in diagnostic.message for diagnostic in result.diagnostics
+    )
+
+
+def test_the_timezone_warning_names_the_timer_in_the_report(tmp_path):
+    show = tmp_path / "show.txt"
+    show.write_text(TIMER_SHOW)
+    log = tmp_path / "journal.log"
+    log.write_text(HEALTHY_LOG)
+    result = scan(ScanOptions(show_paths=[show], log_paths=[log], now=NOW))
+
+    text = to_markdown(result)
+    assert "`unsupported-timezone`" in text
+    assert "Europe/Berlin" in text

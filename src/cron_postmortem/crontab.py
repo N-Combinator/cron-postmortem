@@ -56,6 +56,15 @@ def parse_crontab(
         if not line or line.startswith("#"):
             continue
         if _ENV_RE.match(line):
+            # cronie's CRON_TZ= makes every entry below it fire in another zone.
+            # Schedules here are compared to log timestamps as local wall-clock
+            # time, the same refusal calendarspec makes for OnCalendar=, so say
+            # that the entries below this line are being read in local time.
+            if line.split("=", 1)[0].strip().upper() == "CRON_TZ":
+                problems.append(
+                    f"{origin}:{lineno}: {line.split('=', 1)[0].strip()}= is not "
+                    "applied; the entries below it are analysed in local time"
+                )
             continue
         try:
             schedule, user, command = _split_entry(line, system_format, default_user)
