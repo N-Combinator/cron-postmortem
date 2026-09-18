@@ -26,6 +26,11 @@ EVENT_MERGE_WINDOW = timedelta(seconds=5)
 def build_unit_runs(job_id: str, events: list[UnitEvent]) -> list[Run]:
     """Pair systemd start/finish/fail events into runs.
 
+    ``Starting X...`` opens a run and ``Started X.`` reports that its start-up
+    finished, so a unit logging both (anything that is not ``Type=simple``) still
+    gets one run.  A ``Started`` with no activation waiting for it does open a
+    run: a ``Type=simple`` unit is logged with ``Started`` alone.
+
     Several terminal lines describe one ending (``Main process exited ...`` then
     ``Failed with result ...`` then ``Failed to start ...``), so a terminal event
     that lands right after a run closed enriches that run instead of inventing a
@@ -34,12 +39,22 @@ def build_unit_runs(job_id: str, events: list[UnitEvent]) -> list[Run]:
     """
     runs: list[Run] = []
     open_runs: list[Run] = []
+    activating: list[Run] = []  # opened by "Starting", not yet confirmed by "Started"
     last_closed: Run | None = None
     for event in sorted(events, key=lambda item: item.timestamp):
         if event.kind == "start":
             started = Run(job_id=job_id, start=event.timestamp)
             runs.append(started)
             open_runs.append(started)
+            activating.append(started)
+            continue
+        if event.kind == "started":
+            if activating:
+                activating.pop(0)
+                continue
+            simple = Run(job_id=job_id, start=event.timestamp)
+            runs.append(simple)
+            open_runs.append(simple)
             continue
         if (
             last_closed is not None
@@ -51,6 +66,8 @@ def build_unit_runs(job_id: str, events: list[UnitEvent]) -> list[Run]:
             continue
         if open_runs:
             closing = open_runs.pop(0)
+            # It may have ended without ever reporting a finished start-up.
+            activating = [run for run in activating if run is not closing]
             _close(closing, event)
             last_closed = closing
             continue

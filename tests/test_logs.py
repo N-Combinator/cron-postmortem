@@ -92,6 +92,19 @@ def test_systemd_unit_prefixed_lines():
     assert events[2].result == "exit-code"
 
 
+def test_starting_and_started_are_different_events():
+    # "Starting X..." begins the run; "Started X." only reports that its
+    # start-up finished.  One run, not two.
+    text = (
+        "2026-09-18T04:00:03+0200 h systemd[1]: Starting backup.service - Nightly backup...\n"
+        "2026-09-18T04:00:04+0200 h systemd[1]: Started backup.service - Nightly backup.\n"
+        "2026-09-18T04:00:15+0200 h systemd[1]: backup.service: Deactivated successfully.\n"
+    )
+    assert [event.kind for event in scan(text).unit_events] == [
+        "start", "started", "finish",
+    ]
+
+
 def test_killed_by_signal_is_not_reported_as_an_exit_code():
     text = (
         "2026-09-18T04:00:15+0200 h systemd[1]: backup.service: "

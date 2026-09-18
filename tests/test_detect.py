@@ -130,6 +130,52 @@ def test_the_three_line_failure_sequence_is_one_failed_run():
     assert findings[0].details["evidence"] == "journalctl"
 
 
+def test_started_confirms_the_run_starting_opened():
+    # A unit that is not Type=simple logs both lines for one activation; counting
+    # both as beginnings invents a run that overlaps the real one.
+    runs = detect.build_unit_runs(
+        TIMER_JOB.id,
+        events(
+            ("backup.service", "start", 0, None, None),
+            ("backup.service", "started", 2, None, None),
+            ("backup.service", "finish", 30, 0, "success"),
+        ),
+    )
+    assert [(r.start, r.end) for r in runs] == [(BASE, at(seconds=30))]
+    assert detect.detect_overlaps(TIMER_JOB, runs) == []
+
+
+def test_started_alone_still_opens_a_run():
+    # Type=simple units are announced with "Started" and nothing else.
+    runs = detect.build_unit_runs(
+        TIMER_JOB.id,
+        events(
+            ("web.service", "started", 0, None, None),
+            ("web.service", "finish", 30, 0, "success"),
+            ("web.service", "started", 60, None, None),
+        ),
+    )
+    assert [(r.start, r.end) for r in runs] == [
+        (BASE, at(seconds=30)), (at(seconds=60), None),
+    ]
+
+
+def test_started_does_not_confirm_a_run_that_already_ended():
+    # The first activation died before it could report readiness, so the later
+    # "Started" is a new run, not the confirmation that one never got.
+    runs = detect.build_unit_runs(
+        TIMER_JOB.id,
+        events(
+            ("backup.service", "start", 0, None, None),
+            ("backup.service", "fail", 5, 1, "exit-code"),
+            ("backup.service", "started", 60, None, None),
+        ),
+    )
+    assert [(r.start, r.end) for r in runs] == [
+        (BASE, at(seconds=5)), (at(seconds=60), None),
+    ]
+
+
 def test_concurrent_unit_runs_close_oldest_first():
     runs = detect.build_unit_runs(
         TIMER_JOB.id,

@@ -101,10 +101,16 @@ class CronSession:
 
 @dataclass
 class UnitEvent:
-    """A start/finish/failure event observed for a systemd unit."""
+    """A start/finish/failure event observed for a systemd unit.
+
+    ``start`` and ``started`` are two halves of one beginning: systemd logs
+    ``Starting foo.service...`` when it begins activating the unit and
+    ``Started foo.service.`` when activation finished.  A unit that logs both
+    must still be one run, so only ``start`` opens a run unconditionally.
+    """
 
     unit: str
-    kind: str  # "start" | "finish" | "fail"
+    kind: str  # "start" | "started" | "finish" | "fail"
     timestamp: datetime
     exit_code: int | None = None
     result: str | None = None
@@ -353,9 +359,12 @@ def _handle_systemd_line(
             )
         return
 
+    # "Starting X..." begins a run; "Started X." only says that its start-up
+    # finished.  Treating both as a beginning invents a second run for every
+    # unit that logs both lines, and those phantom runs overlap the real one.
     for verb, kind in (
         ("Starting ", "start"),
-        ("Started ", "start"),
+        ("Started ", "started"),
         ("Finished ", "finish"),
         ("Failed to start ", "fail"),
     ):
