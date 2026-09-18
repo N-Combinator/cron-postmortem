@@ -13,6 +13,7 @@ offset present in a log line is therefore dropped, not converted.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -272,9 +273,40 @@ def scan_lines(
     reference: datetime | None = None,
     description_to_unit: dict[str, str] | None = None,
 ) -> LogScan:
-    """Extract cron runs and systemd unit events from raw log text."""
-    parsed = parse_lines(lines, origin, reference)
-    scan = LogScan(lines_total=len(lines), lines_parsed=len(parsed))
+    """Extract cron runs and systemd unit events from one log source."""
+    return scan_sources([(origin, lines)], reference, description_to_unit)
+
+
+def scan_sources(
+    sources: Sequence[tuple[str, list[str]]],
+    reference: datetime | None = None,
+    description_to_unit: dict[str, str] | None = None,
+) -> LogScan:
+    """Extract cron runs and systemd unit events from several log sources.
+
+    Each source is dated on its own before the lines are merged.  Traditional
+    syslog carries no year, so :func:`parse_lines` infers one from the order of
+    the lines it is handed and rolls it forward on a backwards jump.  Gluing two
+    files together first puts a backwards jump at the seam - ``--log-file syslog
+    --log-file syslog.1`` is the ordinary way to read across a rotation - and
+    that one jump dates a whole file, sometimes both, a year out.
+
+    Merging afterwards keeps the inference per file while a cron session or a
+    unit run that straddles the rotation boundary is still paired up, because
+    the events are extracted from the merged, chronologically sorted stream.
+    """
+    dated: list[tuple[int, LogLine]] = []
+    lines_total = 0
+    for index, (origin, lines) in enumerate(sources):
+        lines_total += len(lines)
+        dated.extend(
+            (index, line) for line in parse_lines(lines, origin, reference)
+        )
+    # Ties keep the order the sources were given in, then the order inside a file.
+    dated.sort(key=lambda item: (item[1].timestamp, item[0], item[1].lineno))
+    parsed = [line for _, line in dated]
+
+    scan = LogScan(lines_total=lines_total, lines_parsed=len(parsed))
     if parsed:
         scan.first_timestamp = parsed[0].timestamp
         scan.last_timestamp = parsed[-1].timestamp

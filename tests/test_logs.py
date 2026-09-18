@@ -191,3 +191,52 @@ def test_a_crond_line_is_parsed_like_a_cron_one():
     run = result.cron_runs[0]
     assert run.command == "/usr/local/bin/backup.sh"
     assert run.end == datetime(2026, 9, 18, 3, 4)
+
+
+# --- several sources at once --------------------------------------------------
+
+def test_each_source_infers_its_own_year():
+    """Year-less syslog is dated from the order of the lines in ONE file.
+
+    Concatenating the sources first puts a backwards jump at the seam, which
+    reads as a December -> January rollover and dates a whole file a year out.
+    """
+    newer = "Sep 17 03:00:01 web01 CRON[1]: (root) CMD (/bin/newer)\n"
+    older = "Sep 10 03:00:01 web01 CRON[2]: (root) CMD (/bin/older)\n"
+
+    result = logs.scan_sources(
+        [("syslog", newer.splitlines()), ("syslog.1", older.splitlines())],
+        reference=NOW,
+    )
+
+    dates = {run.command: run.start for run in result.cron_runs}
+    assert dates["/bin/newer"] == datetime(2026, 9, 17, 3, 0, 1)
+    assert dates["/bin/older"] == datetime(2026, 9, 10, 3, 0, 1)
+    assert (result.lines_total, result.lines_parsed) == (2, 2)
+    assert result.first_timestamp == datetime(2026, 9, 10, 3, 0, 1)
+
+
+def test_sources_are_merged_in_time_order_before_events_are_built():
+    """Dating is per file; pairing is over the merged stream."""
+    newer = (
+        "Sep 18 00:02:00 web01 CRON[10]: pam_unix(cron:session): session closed for user root\n"
+    )
+    older = (
+        "Sep 17 23:59:00 web01 CRON[10]: pam_unix(cron:session): session opened for user root\n"
+        "Sep 17 23:59:00 web01 CRON[11]: (root) CMD (/bin/midnight)\n"
+    )
+
+    result = logs.scan_sources(
+        [("syslog", newer.splitlines()), ("syslog.1", older.splitlines())],
+        reference=NOW,
+    )
+
+    assert len(result.cron_runs) == 1
+    assert result.cron_runs[0].start == datetime(2026, 9, 17, 23, 59, 0)
+    assert result.cron_runs[0].end == datetime(2026, 9, 18, 0, 2, 0)
+
+
+def test_an_empty_source_list_scans_nothing():
+    result = logs.scan_sources([], reference=NOW)
+    assert (result.lines_total, result.lines_parsed) == (0, 0)
+    assert result.first_timestamp is None

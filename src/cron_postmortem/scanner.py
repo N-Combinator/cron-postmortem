@@ -9,7 +9,7 @@ from pathlib import Path
 from . import __version__, calendarspec, cronspec, systemd
 from . import crontab as crontab_mod
 from .detect import build_unit_runs, detect_failures, detect_missed, detect_overlaps
-from .logs import LogScan, journal_cron_identifiers, scan_lines
+from .logs import LogScan, journal_cron_identifiers, scan_sources
 from .model import (
     CRON,
     FAILURE,
@@ -138,11 +138,10 @@ def scan(options: ScanOptions) -> ScanResult:
     states_by_id = {state.unit: state for state in unit_states}
     descriptions = systemd.description_map(unit_states)
 
-    log_text, log_origins = _collect_logs(options, jobs, diagnostics)
+    log_sources, log_origins = _collect_logs(options, jobs, diagnostics)
     sources["logs"] = log_origins
-    scan_data = scan_lines(
-        log_text.splitlines(),
-        origin=", ".join(log_origins) or "journal",
+    scan_data = scan_sources(
+        log_sources,
         reference=options.now,
         description_to_unit=descriptions,
     )
@@ -335,17 +334,26 @@ def _merge_cron_duplicates(jobs: list[Job]) -> list[Job]:
 
 def _collect_logs(
     options: ScanOptions, jobs: list[Job], diagnostics: list[Diagnostic]
-) -> tuple[str, list[str]]:
-    chunks: list[str] = []
+) -> tuple[list[tuple[str, list[str]]], list[str]]:
+    """Gather the log text, keeping every source separate.
+
+    The sources are handed to :func:`~cron_postmortem.logs.scan_sources` one by
+    one rather than concatenated: each has its own chronological order, and that
+    order is the only thing year-less syslog timestamps can be dated from.  Two
+    journalctl queries count as two sources for the same reason - the second one
+    restarts at the beginning of the window.
+    """
+    chunks: list[tuple[str, list[str]]] = []
     origins: list[str] = []
     for path in options.log_paths:
         try:
-            chunks.append(path.read_text(encoding="utf-8", errors="replace"))
+            text = path.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
             diagnostics.append(
                 Diagnostic(None, f"cannot read log file ({exc.strerror or exc})", str(path))
             )
             continue
+        chunks.append((str(path), text.splitlines()))
         origins.append(str(path))
     if options.use_journal:
         since = options.since or options.now - DEFAULT_WINDOW
@@ -356,7 +364,7 @@ def _collect_logs(
             for argument in ("-t", identifier)
         ]
         text, problems = systemd.live_journal(matchers, since, until)
-        chunks.append(text)
+        chunks.append(("journalctl (cron)", text.splitlines()))
         diagnostics.extend(Diagnostic(None, problem) for problem in problems)
         units = sorted({job.unit for job in jobs if job.source == SYSTEMD and job.unit})
         if units:
@@ -364,10 +372,10 @@ def _collect_logs(
             for unit in units:
                 matchers.extend(["-u", unit])
             text, problems = systemd.live_journal(matchers, since, until)
-            chunks.append(text)
+            chunks.append(("journalctl (units)", text.splitlines()))
             diagnostics.extend(Diagnostic(None, problem) for problem in problems)
         origins.append("journalctl")
-    return "\n".join(chunks), origins
+    return chunks, origins
 
 
 def _resolve_window(

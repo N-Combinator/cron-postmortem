@@ -399,3 +399,51 @@ def test_a_hung_cron_run_overlaps_every_run_it_covers(tmp_path):
         "2026-09-18T03:00:01"
     }
     assert {finding.details["overlap_seconds"] for finding in overlaps} == {300.0}
+
+
+def test_each_log_file_is_dated_on_its_own(tmp_path):
+    """A rotated pair is normally passed newest first, which jumps backwards."""
+    crontab = tmp_path / "root"
+    crontab.write_text("0 3 * * * /bin/nightly\n")
+    newer = tmp_path / "syslog"
+    newer.write_text(
+        "Sep 17 03:00:01 h CRON[1]: (root) CMD (/bin/nightly)\n"
+        "Sep 17 04:00:01 h CRON[2]: (root) CMD (/bin/other)\n"
+    )
+    older = tmp_path / "syslog.1"
+    older.write_text(
+        "Sep 10 03:00:01 h CRON[3]: (root) CMD (/bin/nightly)\n"
+        "Sep 11 03:00:01 h CRON[4]: (root) CMD (/bin/nightly)\n"
+    )
+    result = scan(options(crontab_paths=[crontab], log_paths=[newer, older]))
+
+    starts = sorted(run.start for run in result.job_reports[0].runs)
+    # Concatenating the two files first made the seam look like a year rollover
+    # and pushed the whole newer file back into 2025.
+    assert starts == [
+        datetime(2026, 9, 10, 3, 0, 1),
+        datetime(2026, 9, 11, 3, 0, 1),
+        datetime(2026, 9, 17, 3, 0, 1),
+    ]
+    assert result.window_start == datetime(2026, 9, 10, 3, 0, 1)
+
+
+def test_a_run_straddling_a_rotation_still_gets_its_end(tmp_path):
+    """Sources are dated apart but merged before runs are reconstructed."""
+    crontab = tmp_path / "root"
+    crontab.write_text("59 23 * * * /bin/midnight\n")
+    newer = tmp_path / "syslog"
+    newer.write_text(
+        "Sep 18 00:04:00 h CRON[500]: pam_unix(cron:session): session closed for user root\n"
+        "Sep 18 03:00:01 h CRON[600]: (root) CMD (/bin/other)\n"
+    )
+    older = tmp_path / "syslog.1"
+    older.write_text(
+        "Sep 17 23:59:01 h CRON[500]: pam_unix(cron:session): session opened for user root\n"
+        "Sep 17 23:59:01 h CRON[501]: (root) CMD (/bin/midnight)\n"
+    )
+    result = scan(options(crontab_paths=[crontab], log_paths=[newer, older]))
+
+    run = result.job_reports[0].runs[0]
+    assert run.start == datetime(2026, 9, 17, 23, 59, 1)
+    assert run.end == datetime(2026, 9, 18, 0, 4, 0)
