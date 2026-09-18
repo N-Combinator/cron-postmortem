@@ -89,7 +89,7 @@ $ journalctl --since "24 hours ago" -o short-iso -u backup-db.service >> cron.lo
 | ---: | --- |
 | `0` | Nothing wrong and the scan was conclusive (or `--exit-zero`). |
 | `1` | At least one missed run, overlap or failure — or a warning that the scan could not check what it was asked to. |
-| `2` | Usage error: unreadable input, unwritable output. |
+| `2` | Usage error: unreadable input, unwritable output, or arguments that leave nothing to scan. |
 
 ### Warnings
 
@@ -97,11 +97,23 @@ A warning means the report is not conclusive. It is listed under `## Warnings` i
 Markdown report, appears in `warnings` in the JSON, and counts towards exit code 1 —
 `--exit-zero` silences the exit code, not the warning.
 
-| Code | Raised when |
-| --- | --- |
-| `no-schedules` | Not one crontab entry or timer was found, so every detector had nothing to run against. |
-| `no-log-lines` | No log source was given, or nothing in it parsed as a cron/systemd log line — check the format and the syslog identifier. |
-| `unsupported-timezone` | An `OnCalendar=` value names a timezone (see the limitations); that timer is excluded from missed-run detection. |
+| Code | Raised when | Exit |
+| --- | --- | ---: |
+| `no-schedules` | Not one crontab entry or timer was found, so every detector had nothing to run against. | `1` |
+| `no-log-lines` | No log source was given, or nothing in it parsed as a cron/systemd log line — check the format and the syslog identifier. | `1` |
+| `unsupported-timezone` | An `OnCalendar=` value names a timezone (see the limitations); that timer is excluded from missed-run detection. | `1` |
+| `empty-window` | The tolerance is longer than the window it applies to, so no scheduled run could be judged. | `2` / `1` |
+
+`empty-window` is the one warning that can exit `2`. An occurrence is only judged once
+its tolerance has fully elapsed, so the last moment a scan can rule on is `--until`
+minus the tolerance; when that falls before `--since` every job expects nothing and the
+report would otherwise read "No problems found" for a scan that checked nothing.
+`--since 10m --tolerance 3600`, an `--until` older than `--since` and a log too short
+for the tolerance all land here. Those are the caller's arguments contradicting each
+other, so they exit `2` and `--exit-zero` does *not* silence them — that flag mutes
+findings for a monitoring check, not a broken invocation. The same warning at exit `1`
+means one *timer's* own slack (`AccuracySec` + `RandomizedDelaySec`, added to
+`--tolerance`) outlasted an otherwise usable window: only that job went unchecked.
 
 The summary line `Log lines read N, understood M` (`log_lines_total` /
 `log_lines_parsed` in JSON) is there for the in-between case: a log source that is only
@@ -128,7 +140,7 @@ Window `2026-09-18 02:50:00` → `2026-09-18 05:59:40` (tolerance 120s), generat
 | ---: | ---: | -----: | -------: | -------: |
 | 7 | 17 | 2 | 2 | 1 |
 
-Log lines read 64, understood 62.
+Log lines read 63, understood 62.
 
 ## Failures (1)
 
@@ -177,7 +189,7 @@ Log lines read 64, understood 62.
   "summary": {
     "jobs": 7, "runs": 17, "missed": 2, "overlap": 2,
     "failure": 1, "problems": 5, "warnings": 0, "diagnostics": 2,
-    "log_lines_total": 64, "log_lines_parsed": 62
+    "log_lines_total": 63, "log_lines_parsed": 62
   },
   "jobs": [
     {
@@ -216,11 +228,18 @@ Log lines read 64, understood 62.
 | What was supposed to run? | `/etc/crontab`, `/etc/cron.d/*`, user crontabs, and `OnCalendar=` from `systemctl show <timer>`. |
 | What did run? | `(user) CMD (...)` lines in syslog/journal, and `Starting`/`Started`/`Finished`/`Succeeded` lines for systemd units. `Starting X...` opens a run and `Started X.` reports that its start-up finished, so a unit logging both is still one run. |
 | How long did it run? | For cron, the `pam_unix(cron:session)` open/close pair that brackets the `CMD` line. For systemd, the start and terminal lines for the unit. |
+| Did two runs collide? | Every *pair* of runs of the same job that was alive at the same time, not just neighbours in start order — one run hung for three hours is reported against each of the runs that started underneath it, and the reported overlap is the time the two actually ran side by side. |
 | Did it fail? | `Main process exited, code=exited, status=N`, `Failed with result '...'`, and `ActiveState` / `Result` from `systemctl show`. systemd's own verdict wins over the raw exit status, so a unit with `SuccessExitStatus=3` that exits 3 is healthy; `ExecMainStatus` decides only when the capture carries no `Result=`. |
 
 Supported log formats: traditional syslog (`Sep 18 03:00:01 host CRON[1234]: ...`) and
 the journalctl renderings `short-iso`, `short-iso-precise` and `short-full`. Traditional
 syslog carries no year, so it is inferred from `--now` with December→January rollover.
+That inference reads the order of the lines, so **each `--log-file` is dated on its
+own** before the sources are merged: `--log-file /var/log/syslog --log-file
+/var/log/syslog.1` reads a rotated pair in the usual newest-first order, and gluing the
+two together would make the seam look like a rollover and push a whole file a year out.
+Runs are reconstructed from the merged, time-ordered stream afterwards, so a job whose
+`pam_unix` session straddles the rotation still gets its end.
 
 Cron is recognised under the identifiers `cron` and `crond` in either case — Debian logs
 as `CRON`, cronie as `CROND` — and `--journal` asks `journalctl -t` for all four
@@ -242,6 +261,10 @@ rather than N unrelated failures.
 Without `--until` (and without `--journal`) the end still *defaults* to the log's last
 entry, which keeps an offline scan of a stand-alone log file reproducible. Pass
 `--until now` to check the tail as well.
+
+The tolerance is subtracted from the window's end before anything is judged, so a
+window shorter than the tolerance leaves nothing to check at all; that is refused with
+the `empty-window` warning and exit code 2 rather than reported as a clean run.
 
 The window governs all three detectors, not just the missed ones: runs that started
 outside it are left out of the report, so `--since 1h` cannot surface an overlap from
