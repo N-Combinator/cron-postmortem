@@ -20,6 +20,10 @@ different answers to a monitoring check.
 
 Zero runtime dependencies, Python 3.10+, Linux.
 
+[**Why this exists**](docs/motivation.md) — the four posts this was built from, and
+the scenario tests in [`tests/test_scenarios.py`](tests/test_scenarios.py) that rebuild
+each of their situations.
+
 ## Install
 
 ```console
