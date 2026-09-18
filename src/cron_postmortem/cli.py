@@ -144,7 +144,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        now = parse_when(args.now, datetime.now()) if args.now else datetime.now()
+        # Whole seconds keep the window in the report readable.
+        clock = datetime.now().replace(microsecond=0)
+        now = parse_when(args.now, clock) if args.now else clock
         since = parse_when(args.since, now) if args.since else None
         until = parse_when(args.until, now) if args.until else None
     except TimeArgError as exc:

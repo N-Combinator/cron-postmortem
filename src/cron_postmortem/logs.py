@@ -65,10 +65,6 @@ _RESULT_RE = re.compile(r"Failed with result '(?P<result>[^']+)'")
 _UNIT_IN_VERB_RE = re.compile(r"^(?P<unit>[\w@.\\:\-]+\.service)(?:\s+-\s+.*)?$")
 
 
-class LogParseError(ValueError):
-    """Raised when a log file yields no usable timestamps at all."""
-
-
 @dataclass
 class LogLine:
     timestamp: datetime

@@ -169,7 +169,9 @@ def _collect_jobs(
     jobs: list[Job] = []
     paths = list(options.crontab_paths)
     if options.discover:
-        paths.extend(crontab_mod.discover_crontab_files())
+        discovered, problems = crontab_mod.discover_crontab_files()
+        paths.extend(discovered)
+        diagnostics.extend(Diagnostic(None, problem) for problem in problems)
     for path in paths:
         found, problems = crontab_mod.load_crontab_file(
             path, options.crontab_format, options.crontab_user

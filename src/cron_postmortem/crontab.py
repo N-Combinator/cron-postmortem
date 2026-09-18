@@ -124,21 +124,33 @@ def load_crontab_file(
     return parse_crontab(text, str(path), system_format, user)
 
 
-def discover_crontab_files() -> list[Path]:
-    """Every crontab file on this host that we are allowed to read."""
+def discover_crontab_files() -> tuple[list[Path], list[str]]:
+    """Every crontab file on this host that we are allowed to read.
+
+    Spool directories are mode 0700 root, so a non-root scan legitimately cannot
+    list them; that is reported as a problem rather than raised, so the rest of
+    the scan still produces a report.
+    """
     found: list[Path] = []
+    problems: list[str] = []
     if SYSTEM_CRONTAB.is_file():
         found.append(SYSTEM_CRONTAB)
-    for directory in CRON_D_DIRS:
-        if not directory.is_dir():
+    for directory in (*CRON_D_DIRS, *SPOOL_DIRS):
+        try:
+            entries = sorted(directory.iterdir())
+        except FileNotFoundError:
             continue
-        for entry in sorted(directory.iterdir()):
-            if entry.is_file() and not _IGNORED_NAME_RE.search(entry.name):
-                found.append(entry)
-    for directory in SPOOL_DIRS:
-        if not directory.is_dir():
+        except OSError as exc:
+            problems.append(
+                f"{directory}: cannot list ({exc.strerror or exc}); "
+                "run as root or pass --crontab to include it"
+            )
             continue
-        for entry in sorted(directory.iterdir()):
-            if entry.is_file() and os.access(entry, os.R_OK):
-                found.append(entry)
-    return found
+        for entry in entries:
+            if not entry.is_file() or _IGNORED_NAME_RE.search(entry.name):
+                continue
+            if not os.access(entry, os.R_OK):
+                problems.append(f"{entry}: not readable; run as root to include it")
+                continue
+            found.append(entry)
+    return found, problems
