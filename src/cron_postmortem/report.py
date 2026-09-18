@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from .model import FAILURE, MISSED, OVERLAP
 from .scanner import ScanResult
@@ -12,6 +13,38 @@ _HEADINGS = {
     OVERLAP: "Overlapping runs",
     FAILURE: "Failures",
 }
+
+_BACKTICKS = re.compile(r"`+")
+
+
+def _code(value: object) -> str:
+    """A code span that survives the backticks in a cron command.
+
+    ``0 3 * * * echo `date` >> /log`` would otherwise close the span early and
+    spill the rest of the command into the table as markup.  The fence is one
+    backtick longer than the longest run inside the text, and content touching a
+    backtick is padded, exactly as CommonMark prescribes.
+    """
+    text = str(value)
+    if not text:
+        return ""
+    fence = "`" * (max((len(run) for run in _BACKTICKS.findall(text)), default=0) + 1)
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{fence}{pad}{text}{pad}{fence}"
+
+
+def _cell(value: object) -> str:
+    """Escape a value for a Markdown table cell.
+
+    A raw ``|`` ends the cell — even inside a code span, which is where cron
+    commands put theirs — and a newline ends the row, so a single piped command
+    shears the whole table apart.  ``\\|`` is the one escape GFM honours here.
+    """
+    return str(value).replace("|", r"\|").replace("\r", " ").replace("\n", " ")
+
+
+def _code_cell(value: object) -> str:
+    return _cell(_code(value))
 
 
 def to_json(result: ScanResult, indent: int | None = 2) -> str:
@@ -50,7 +83,7 @@ def to_markdown(result: ScanResult) -> str:
             lines.append(f"## {_HEADINGS[kind]} ({len(group)})")
             lines.append("")
             for finding in group:
-                lines.append(f"- **{finding.job_id}** — {finding.message}")
+                lines.append(f"- {_code(finding.job_id)} — {finding.message}")
             lines.append("")
 
     lines.append("## Jobs")
@@ -60,7 +93,8 @@ def to_markdown(result: ScanResult) -> str:
     for report in sorted(result.job_reports, key=lambda item: item.job.id):
         schedule = report.job.schedule if report.schedule_ok else f"{report.job.schedule} (?)"
         lines.append(
-            f"| `{report.job.id}` | {report.job.source} | `{schedule}` "
+            f"| {_code_cell(report.job.id)} | {_cell(report.job.source)} "
+            f"| {_code_cell(schedule)} "
             f"| {report.expected} | {len(report.runs)} | {len(report.findings)} |"
         )
     lines.append("")
@@ -69,7 +103,7 @@ def to_markdown(result: ScanResult) -> str:
         lines.append(f"## Diagnostics ({len(result.diagnostics)})")
         lines.append("")
         for diagnostic in result.diagnostics:
-            prefix = f"`{diagnostic.job_id}`: " if diagnostic.job_id else ""
+            prefix = f"{_code(diagnostic.job_id)}: " if diagnostic.job_id else ""
             lines.append(f"- {prefix}{diagnostic.message}")
         lines.append("")
 

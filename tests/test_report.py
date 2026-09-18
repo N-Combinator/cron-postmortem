@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from cron_postmortem.report import to_json, to_markdown
 from cron_postmortem.scanner import ScanOptions, scan
@@ -60,3 +61,27 @@ def test_unparsable_schedules_are_flagged_in_the_job_table(tmp_path):
     log.write_text("Sep 18 03:00:01 h CRON[2]: (root) CMD (/bin/other)\n")
     text = to_markdown(build(crontab_paths=[crontab], log_paths=[log]))
     assert "`@reboot (?)`" in text
+
+
+def test_markdown_table_survives_a_piped_command(tmp_path):
+    crontab = tmp_path / "root"
+    crontab.write_text("0 3 * * * grep -c ERROR /var/log/app.log | mail -s 'errors' ops\n")
+    log = tmp_path / "syslog"
+    log.write_text("Sep 18 03:00:01 h CRON[2]: (root) CMD (/bin/other)\n")
+    text = to_markdown(build(crontab_paths=[crontab], log_paths=[log]))
+    rows = [line for line in text.splitlines() if line.startswith("| `cron:root:")]
+    assert len(rows) == 1
+    # Every pipe inside the command is escaped, so the row still has six cells.
+    assert r"\|" in rows[0]
+    assert len(re.findall(r"(?<!\\)\|", rows[0])) == 7
+
+
+def test_markdown_code_spans_survive_backticks_in_a_command(tmp_path):
+    crontab = tmp_path / "root"
+    crontab.write_text("0 3 * * * echo `date` >> /var/log/stamp\n")
+    log = tmp_path / "syslog"
+    log.write_text("Sep 18 03:00:01 h CRON[2]: (root) CMD (/bin/other)\n")
+    text = to_markdown(build(crontab_paths=[crontab], log_paths=[log]))
+    row = next(line for line in text.splitlines() if "stamp" in line and line.startswith("|"))
+    # The fence is longer than the backtick run it has to contain.
+    assert "``cron:root:echo `date` >> /var/log/stamp``" in row
