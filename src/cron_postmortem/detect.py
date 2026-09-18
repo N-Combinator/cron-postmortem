@@ -99,9 +99,15 @@ def _close(run: Run, event: UnitEvent) -> None:
 
 
 def run_failed(run: Run) -> bool:
-    if run.exit_code is not None and run.exit_code != 0:
-        return True
-    return bool(run.result) and run.result not in {"success", ""}
+    """Whether a reconstructed run failed, by systemd's verdict where we have one.
+
+    ``Result=`` / ``Deactivated successfully`` is systemd's own judgement and
+    already accounts for ``SuccessExitStatus=``, so it outranks the raw exit
+    status; the status decides only when the journal gave us no verdict.
+    """
+    if run.result:
+        return run.result != "success"
+    return run.exit_code is not None and run.exit_code != 0
 
 
 def detect_missed(

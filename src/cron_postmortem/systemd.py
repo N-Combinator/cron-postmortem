@@ -60,10 +60,19 @@ class UnitState:
 
     @property
     def is_failed(self) -> bool:
+        """systemd's own verdict on the last run, not the raw exit status.
+
+        ``SuccessExitStatus=3`` (and ``RestartPreventExitStatus``, and any unit
+        whose ``ExecStart`` documents a non-zero success code) makes systemd
+        record ``Result=success`` for a unit that exited 3.  Reading
+        ``ExecMainStatus`` directly reports that healthy unit as failed, so the
+        status is only consulted when the capture carries no ``Result=`` at all
+        — an older systemd, or a hand-trimmed ``systemctl show``.
+        """
         if self.active_state == "failed":
             return True
-        if self.result and self.result not in {"success", ""}:
-            return True
+        if self.result:
+            return self.result != "success"
         status = self.exit_status
         return status is not None and status != 0
 

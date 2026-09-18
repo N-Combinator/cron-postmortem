@@ -240,6 +240,31 @@ def test_a_healthy_unit_produces_no_failure():
     assert detect.detect_failures(TIMER_JOB, runs, state) == []
 
 
+def test_a_success_exit_status_unit_is_not_a_failure():
+    # SuccessExitStatus=3: the unit exits 3 and systemd calls that a success.
+    state = parse_show(
+        "Id=backup.service\nActiveState=inactive\nSubState=dead\nResult=success\n"
+        "ExecMainStatus=3\nExecMainExitTimestamp=Fri 2026-09-18 03:00:12 CEST\n"
+    )[0]
+    assert state.is_failed is False
+    runs = detect.build_unit_runs(
+        TIMER_JOB.id,
+        events(
+            ("backup.service", "start", 0, None, None),
+            ("backup.service", "fail", 12, 3, None),
+            ("backup.service", "finish", 12, 0, "success"),
+        ),
+    )
+    assert runs[0].exit_code == 3
+    assert not detect.run_failed(runs[0])
+    assert detect.detect_failures(TIMER_JOB, runs, state) == []
+
+
+def test_a_capture_without_a_result_falls_back_to_the_exit_status():
+    state = parse_show("Id=backup.service\nActiveState=inactive\nExecMainStatus=2\n")[0]
+    assert state.is_failed is True
+
+
 def test_cron_jobs_never_report_failures():
     # syslog carries no exit codes for plain cron; that is a data-source limit.
     assert detect.detect_failures(CRON_JOB, [run(BASE, at(minutes=1))], None) == []
