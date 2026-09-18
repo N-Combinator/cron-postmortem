@@ -67,8 +67,16 @@ def test_overlap_when_the_next_run_starts_before_the_previous_ends():
     runs = [run(BASE, at(minutes=40)), run(at(minutes=30), at(minutes=35))]
     findings = detect.detect_overlaps(CRON_JOB, runs)
     assert [finding.kind for finding in findings] == [OVERLAP]
-    assert findings[0].details["overlap_seconds"] == 600.0
+    # 03:30 to 03:35: the time the two were actually running side by side, not
+    # the time the older one had left to run.
+    assert findings[0].details["overlap_seconds"] == 300.0
     assert findings[0].when == at(minutes=30)
+
+
+def test_the_overlap_of_a_run_with_no_end_is_measured_to_the_covering_end():
+    runs = [run(BASE, at(minutes=40)), run(at(minutes=30))]
+    findings = detect.detect_overlaps(CRON_JOB, runs)
+    assert findings[0].details["overlap_seconds"] == 600.0
 
 
 def test_back_to_back_runs_do_not_overlap():
@@ -81,13 +89,43 @@ def test_unknown_end_cannot_produce_an_overlap():
     assert detect.detect_overlaps(CRON_JOB, runs) == []
 
 
-def test_three_way_overlap_reports_each_consecutive_pair():
+def test_three_concurrent_runs_report_every_pair():
     runs = [
         run(BASE, at(minutes=50)),
         run(at(minutes=10), at(minutes=55)),
         run(at(minutes=20), at(minutes=25)),
     ]
-    assert len(detect.detect_overlaps(CRON_JOB, runs)) == 2
+    findings = detect.detect_overlaps(CRON_JOB, runs)
+    # 03:10 against 03:00, then 03:20 against both of them.
+    assert [
+        (f.details["started"], f.details["previous_start"]) for f in findings
+    ] == [
+        (at(minutes=10).isoformat(), BASE.isoformat()),
+        (at(minutes=20).isoformat(), BASE.isoformat()),
+        (at(minutes=20).isoformat(), at(minutes=10).isoformat()),
+    ]
+
+
+def test_one_hung_run_is_reported_against_every_run_it_covers():
+    # The case a neighbours-only comparison hides: a job wedged for three hours
+    # while its next three runs start on schedule underneath it.  Counting that
+    # as a single overlap makes a stuck job look like a near miss.
+    hung = run(BASE, at(hours=3))
+    runs = [hung, *(run(at(hours=n), at(hours=n, minutes=5)) for n in (1, 2))]
+    findings = detect.detect_overlaps(CRON_JOB, runs)
+    assert len(findings) == 2
+    assert {f.details["previous_start"] for f in findings} == {BASE.isoformat()}
+    assert [f.details["overlap_seconds"] for f in findings] == [300.0, 300.0]
+
+
+def test_a_run_covering_others_that_also_overlap_each_other_reports_all_pairs():
+    runs = [
+        run(BASE, at(hours=2)),           # hung
+        run(at(minutes=30), at(hours=1)),  # inside it
+        run(at(minutes=45), at(minutes=50)),  # inside both
+    ]
+    findings = detect.detect_overlaps(CRON_JOB, runs)
+    assert len(findings) == 3
 
 
 # --- systemd failures -------------------------------------------------------

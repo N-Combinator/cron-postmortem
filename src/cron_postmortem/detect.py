@@ -153,34 +153,61 @@ def detect_missed(
 
 
 def detect_overlaps(job: Job, runs: list[Run]) -> list[Finding]:
-    """Runs that started before the previous run of the same job had finished."""
+    """Every pair of runs of this job that were alive at the same time.
+
+    Comparing each run only with its neighbour in start order hides the case this
+    detector exists for: one run that hangs for hours is still running when the
+    next three or four start, and each of those is a separate collision - another
+    process on the same lock, the same table, the same output file.  Counting
+    that as a single overlap reports a stuck job as no worse than two runs that
+    brushed past each other.  The sweep below keeps the runs still open at each
+    start, so a hung run is reported against every run it covers.
+
+    A run whose end is unknown (plain cron with no ``pam_unix`` session lines)
+    cannot be shown to have covered anything, so it opens no pair of its own; it
+    can still be covered by a run whose end we do know.
+    """
     findings: list[Finding] = []
-    ordered = sorted(runs, key=lambda run: run.start)
-    for previous, current in zip(ordered, ordered[1:], strict=False):
-        if previous.end is None or current.start >= previous.end:
-            continue
-        overlap = (previous.end - current.start).total_seconds()
-        findings.append(
-            Finding(
-                kind=OVERLAP,
-                severity=WARNING,
-                job_id=job.id,
-                source=job.source,
-                message=(
-                    f"run started {current.start.isoformat(sep=' ')} while the run from "
-                    f"{previous.start.isoformat(sep=' ')} was still going "
-                    f"(overlap {overlap:.0f}s)"
-                ),
-                when=current.start,
-                details={
-                    "previous_start": previous.start.isoformat(),
-                    "previous_end": previous.end.isoformat(),
-                    "started": current.start.isoformat(),
-                    "overlap_seconds": overlap,
-                },
-            )
+    ordered = sorted(runs, key=lambda run: (run.start, run.end or run.start))
+    # (run, end) for the runs not yet finished at this point, in start order.
+    still_open: list[tuple[Run, datetime]] = []
+    for current in ordered:
+        still_open = [item for item in still_open if item[1] > current.start]
+        findings.extend(
+            _overlap_finding(job, previous, previous_end, current)
+            for previous, previous_end in still_open
         )
+        if current.end is not None:
+            still_open.append((current, current.end))
     return findings
+
+
+def _overlap_finding(
+    job: Job, previous: Run, previous_end: datetime, current: Run
+) -> Finding:
+    # The time the two actually ran side by side.  Measuring to ``previous_end``
+    # alone would charge a five-second run with the whole remaining hour of the
+    # hung run covering it, which now happens often enough to matter.
+    until = previous_end if current.end is None else min(previous_end, current.end)
+    overlap = (until - current.start).total_seconds()
+    return Finding(
+        kind=OVERLAP,
+        severity=WARNING,
+        job_id=job.id,
+        source=job.source,
+        message=(
+            f"run started {current.start.isoformat(sep=' ')} while the run from "
+            f"{previous.start.isoformat(sep=' ')} was still going "
+            f"(overlap {overlap:.0f}s)"
+        ),
+        when=current.start,
+        details={
+            "previous_start": previous.start.isoformat(),
+            "previous_end": previous_end.isoformat(),
+            "started": current.start.isoformat(),
+            "overlap_seconds": overlap,
+        },
+    )
 
 
 def detect_failures(

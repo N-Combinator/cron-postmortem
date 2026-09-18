@@ -368,3 +368,34 @@ def test_a_started_line_does_not_invent_an_overlap(tmp_path):
     assert [run.start.hour for run in report.runs] == [3, 4, 5]
     assert [run.duration for run in report.runs] == [1199.0, 1199.0, 1199.0]
     assert result.counts() == {MISSED: 0, OVERLAP: 0, FAILURE: 0}
+
+
+def test_a_hung_cron_run_overlaps_every_run_it_covers(tmp_path):
+    """One wedged run, three on-time runs underneath it: three collisions."""
+    crontab = tmp_path / "root"
+    crontab.write_text("0 * * * * /bin/collect\n")
+    log = tmp_path / "syslog"
+    log.write_text(
+        # 03:00 opens and does not close until 06:30.
+        "Sep 18 03:00:01 h CRON[100]: pam_unix(cron:session): session opened for user root\n"
+        "Sep 18 03:00:01 h CRON[101]: (root) CMD (/bin/collect)\n"
+        + "".join(
+            f"Sep 18 0{hour}:00:01 h CRON[{hour}00]: "
+            "pam_unix(cron:session): session opened for user root\n"
+            f"Sep 18 0{hour}:00:01 h CRON[{hour}01]: (root) CMD (/bin/collect)\n"
+            f"Sep 18 0{hour}:05:01 h CRON[{hour}00]: "
+            "pam_unix(cron:session): session closed for user root\n"
+            for hour in (4, 5, 6)
+        )
+        + "Sep 18 06:30:00 h CRON[100]: pam_unix(cron:session): session closed for user root\n"
+    )
+    result = scan(options(crontab_paths=[crontab], log_paths=[log]))
+
+    overlaps = [finding for finding in result.findings if finding.kind == OVERLAP]
+    assert len(overlaps) == 3
+    # Every one of them is against the 03:00 run, and each is charged only the
+    # five minutes it actually ran for.
+    assert {finding.details["previous_start"] for finding in overlaps} == {
+        "2026-09-18T03:00:01"
+    }
+    assert {finding.details["overlap_seconds"] for finding in overlaps} == {300.0}
