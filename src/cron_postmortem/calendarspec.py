@@ -155,7 +155,7 @@ def _lookup(token: str, low: int, high: int, names: dict[str, int]) -> int:
     return value
 
 
-def _split_weekdays(token: str) -> frozenset[int] | None:
+def _split_weekdays(token: str) -> frozenset[int]:
     """Parse ``Mon``, ``Mon..Fri``, ``Sat,Sun`` into python weekday numbers."""
     days: set[int] = set()
     for part in token.split(","):

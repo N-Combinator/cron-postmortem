@@ -16,9 +16,10 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-CRON_IDENTS = {"cron", "crond", "CRON", "CROND"}
+# Compared against a lower-cased syslog identifier (cron logs as CRON on Debian).
+CRON_IDENTS = {"cron", "crond"}
 SYSTEMD_IDENTS = {"systemd"}
-KNOWN_IDENTS = {i.lower() for i in CRON_IDENTS} | SYSTEMD_IDENTS
+KNOWN_IDENTS = CRON_IDENTS | SYSTEMD_IDENTS
 
 MONTHS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
@@ -246,7 +247,7 @@ def scan_lines(
 
     for line in parsed:
         ident = line.ident.lower()
-        if ident in {"cron", "crond"}:
+        if ident in CRON_IDENTS:
             _handle_cron_line(line, scan, open_sessions)
         elif ident in SYSTEMD_IDENTS:
             _handle_systemd_line(line, scan, description_to_unit or {})

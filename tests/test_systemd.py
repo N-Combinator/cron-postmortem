@@ -51,15 +51,16 @@ def test_monotonic_timer_is_reported_as_unanalysable(fixtures):
     assert any("boot-cleanup.timer" in problem for problem in problems)
 
 
-def test_multiple_oncalendar_lines_become_separate_jobs():
+def test_multiple_oncalendar_lines_are_one_job_systemd_ors_them():
     text = (
         "Id=x.timer\nUnit=x.service\n"
         "TimersCalendar={ OnCalendar=*-*-* 03:00:00 ; next_elapse=n/a }"
         "{ OnCalendar=*-*-* 15:00:00 ; next_elapse=n/a }\n"
     )
     jobs, _ = systemd.timer_jobs(systemd.parse_show(text), "show")
-    assert [job.schedule for job in jobs] == ["*-*-* 03:00:00", "*-*-* 15:00:00"]
-    assert [job.id for job in jobs] == ["systemd:x.timer#1", "systemd:x.timer#2"]
+    assert [job.id for job in jobs] == ["systemd:x.timer"]
+    assert jobs[0].schedules == ("*-*-* 03:00:00", "*-*-* 15:00:00")
+    assert jobs[0].schedule == "*-*-* 03:00:00 ; *-*-* 15:00:00"
 
 
 def test_failure_state_detection():

@@ -138,19 +138,19 @@ def timer_jobs(units: list[UnitState], origin: str) -> tuple[list[Job], list[str
                 "not schedulable from a calendar)"
             )
             continue
-        for index, calendar in enumerate(calendars):
-            calendar = calendar.strip()
-            suffix = f"#{index + 1}" if len(calendars) > 1 else ""
-            jobs.append(
-                Job(
-                    id=f"systemd:{unit.unit}{suffix}",
-                    source=SYSTEMD,
-                    schedule=calendar,
-                    origin=origin,
-                    unit=service,
-                    timer=unit.unit,
-                )
+        calendars = [calendar.strip() for calendar in calendars]
+        jobs.append(
+            Job(
+                id=f"systemd:{unit.unit}",
+                source=SYSTEMD,
+                # Several OnCalendar= lines in one unit fire independently.
+                schedule=" ; ".join(calendars),
+                schedules=tuple(calendars),
+                origin=origin,
+                unit=service,
+                timer=unit.unit,
             )
+        )
     return jobs, problems
 
 

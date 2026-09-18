@@ -200,3 +200,33 @@ def test_serialisation_round_trips(systemd_result):
     assert payload["sources"]["logs"] == [str(FIXTURES / "journal-systemd.log")]
     first = payload["jobs"][0]
     assert set(first) >= {"id", "schedule", "expected_runs", "observed_runs", "findings"}
+
+
+def test_a_timer_with_two_calendars_expects_both_and_reports_once(tmp_path):
+    show = tmp_path / "show.txt"
+    show.write_text(
+        "Id=twice.timer\nUnit=twice.service\nAccuracyUSec=1min\n"
+        "TimersCalendar={ OnCalendar=*-*-* 03:00:00 ; next_elapse=n/a }"
+        "{ OnCalendar=*-*-* 04:00:00 ; next_elapse=n/a }\n"
+        "\nId=twice.service\nDescription=Runs twice\nActiveState=failed\n"
+        "Result=exit-code\nExecMainStatus=1\n"
+        "ExecMainExitTimestamp=Fri 2026-09-18 03:00:05 CEST\n"
+    )
+    log = tmp_path / "journal.log"
+    log.write_text(
+        "2026-09-18T02:59:00+0200 h systemd[1]: Starting twice.service - Runs twice...\n"
+        "2026-09-18T02:59:30+0200 h systemd[1]: twice.service: Deactivated successfully.\n"
+        "2026-09-18T03:00:01+0200 h systemd[1]: Starting twice.service - Runs twice...\n"
+        "2026-09-18T03:00:05+0200 h systemd[1]: twice.service: "
+        "Main process exited, code=exited, status=1/FAILURE\n"
+        "2026-09-18T03:00:05+0200 h systemd[1]: twice.service: Failed with result 'exit-code'.\n"
+        "2026-09-18T05:00:00+0200 h systemd[1]: Starting twice.service - Runs twice...\n"
+        "2026-09-18T05:00:02+0200 h systemd[1]: twice.service: Deactivated successfully.\n"
+    )
+    result = scan(options(show_paths=[show], log_paths=[log]))
+    assert len(result.job_reports) == 1
+    report = result.job_reports[0]
+    assert report.job.schedules == ("*-*-* 03:00:00", "*-*-* 04:00:00")
+    assert report.expected == 2
+    # One missed 04:00 occurrence and exactly one failure, not one per calendar.
+    assert result.counts() == {MISSED: 1, OVERLAP: 0, FAILURE: 1}

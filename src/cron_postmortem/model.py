@@ -28,12 +28,19 @@ class Job:
     command: str | None = None
     unit: str | None = None
     timer: str | None = None
+    # A systemd timer may carry several OnCalendar= lines, which systemd ORs.
+    schedules: tuple[str, ...] = ()
+
+    @property
+    def schedule_list(self) -> tuple[str, ...]:
+        return self.schedules or (self.schedule,)
 
     def as_dict(self) -> dict:
         return {
             "id": self.id,
             "source": self.source,
             "schedule": self.schedule,
+            "schedules": list(self.schedule_list),
             "origin": self.origin,
             "user": self.user,
             "command": self.command,

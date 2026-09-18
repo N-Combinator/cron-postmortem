@@ -337,24 +337,28 @@ def _analyse_job(
     else:
         runs = build_unit_runs(job.id, unit_events)
 
-    occurrences: list[datetime] = []
-    schedule_ok = True
     # An occurrence is only judged once its tolerance has fully elapsed inside the
     # window; otherwise the very last scheduled run is always "missed".
     deadline = window_end - timedelta(seconds=tolerance)
-    try:
-        if job.source == CRON:
-            occurrences = cronspec.parse(job.schedule).occurrences(window_start, deadline)
-        else:
-            occurrences = calendarspec.parse(job.schedule).occurrences(window_start, deadline)
-    except (cronspec.CronParseError, calendarspec.CalendarParseError) as exc:
-        schedule_ok = False
-        diagnostics.append(
-            Diagnostic(job.id, f"schedule {job.schedule!r} not analysable: {exc}", job.origin)
-        )
+    parse = cronspec.parse if job.source == CRON else calendarspec.parse
+    moments: set[datetime] = set()
+    schedule_ok = True
+    for expression in job.schedule_list:
+        try:
+            moments.update(parse(expression).occurrences(window_start, deadline))
+        except (cronspec.CronParseError, calendarspec.CalendarParseError) as exc:
+            schedule_ok = False
+            diagnostics.append(
+                Diagnostic(
+                    job.id, f"schedule {expression!r} not analysable: {exc}", job.origin
+                )
+            )
+    occurrences = sorted(moments)
 
     findings: list[Finding] = []
-    if schedule_ok and MISSED not in options.ignore:
+    if MISSED not in options.ignore:
+        # An unparsable expression contributes no occurrences, so a partially
+        # understood schedule is under-checked rather than falsely flagged.
         findings.extend(detect_missed(job, occurrences, runs, tolerance))
     if OVERLAP not in options.ignore:
         findings.extend(detect_overlaps(job, runs))

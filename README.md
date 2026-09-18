@@ -159,6 +159,7 @@ Window `2026-09-18 02:50:00` → `2026-09-18 05:59:40` (tolerance 120s), generat
       "id": "cron:root:/usr/local/bin/backup.sh",
       "source": "cron",
       "schedule": "0 3 * * *",
+      "schedules": ["0 3 * * *"],
       "origin": "tests/fixtures/etc/crontab:7",
       "user": "root",
       "command": "/usr/local/bin/backup.sh",
@@ -214,6 +215,8 @@ would look missed.
   as diagnostics rather than silently ignored.
 - Monotonic timers (`OnBootSec=`, `OnUnitActiveSec=`) have no calendar, so they cannot be
   checked for missed runs.
+- A timer with several `OnCalendar=` lines is one job: systemd ORs them, so the expected
+  occurrences are the union and a failure is reported once, not once per line.
 - `Persistent=yes` catch-up runs after a boot are reported at the time they actually ran,
   which may be well after the scheduled time.
 - Linux only. Out of scope for v0.1: wrapping jobs, modifying schedules, push-style
