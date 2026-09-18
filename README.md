@@ -10,7 +10,8 @@ finds something, so it drops straight into a monitoring check.
 
 - **MISSED** — the schedule says a run was due, no run started within the tolerance.
 - **OVERLAP** — a run started while the previous run of the same job was still going.
-- **FAILURE** — a systemd unit exited non-zero, was killed, or is `ActiveState=failed`.
+- **FAILURE** — a systemd unit run that systemd itself calls a failure: `Result=` other
+  than `success`, or `ActiveState=failed`.
 
 Zero runtime dependencies, Python 3.10+, Linux.
 
@@ -108,17 +109,17 @@ Window `2026-09-18 02:50:00` → `2026-09-18 05:59:40` (tolerance 120s), generat
 
 ## Failures (1)
 
-- **systemd:backup-db.timer** — run started 2026-09-18 04:00:03 failed (exit code 1, result exit-code); seen in the journal for backup-db.service
+- `systemd:backup-db.timer` — run started 2026-09-18 04:00:03 failed (exit code 1, result exit-code); seen in the journal for backup-db.service
 
 ## Missed runs (2)
 
-- **cron:root:/usr/local/bin/sync-metrics.sh** — scheduled for 2026-09-18 04:00:00 but no run started within 120s
-- **systemd:metrics-push.timer** — scheduled for 2026-09-18 04:00:00 but no run started within 180s
+- `cron:root:/usr/local/bin/sync-metrics.sh` — scheduled for 2026-09-18 04:00:00 but no run started within 120s
+- `systemd:metrics-push.timer` — scheduled for 2026-09-18 04:00:00 but no run started within 180s
 
 ## Overlapping runs (2)
 
-- **systemd:logship.timer** — run started 2026-09-18 04:30:02 while the run from 2026-09-18 03:30:00 was still going (overlap 308s)
-- **cron:root:/usr/local/bin/sync-metrics.sh** — run started 2026-09-18 05:30:02 while the run from 2026-09-18 05:00:01 was still going (overlap 158s)
+- `systemd:logship.timer` — run started 2026-09-18 04:30:02 while the run from 2026-09-18 03:30:00 was still going (overlap 308s)
+- `cron:root:/usr/local/bin/sync-metrics.sh` — run started 2026-09-18 05:30:02 while the run from 2026-09-18 05:00:01 was still going (overlap 158s)
 
 ## Jobs
 
@@ -188,9 +189,9 @@ Window `2026-09-18 02:50:00` → `2026-09-18 05:59:40` (tolerance 120s), generat
 | Question | Where the answer comes from |
 | --- | --- |
 | What was supposed to run? | `/etc/crontab`, `/etc/cron.d/*`, user crontabs, and `OnCalendar=` from `systemctl show <timer>`. |
-| What did run? | `(user) CMD (...)` lines in syslog/journal, and `Starting`/`Finished`/`Succeeded` lines for systemd units. |
+| What did run? | `(user) CMD (...)` lines in syslog/journal, and `Starting`/`Started`/`Finished`/`Succeeded` lines for systemd units. `Starting X...` opens a run and `Started X.` reports that its start-up finished, so a unit logging both is still one run. |
 | How long did it run? | For cron, the `pam_unix(cron:session)` open/close pair that brackets the `CMD` line. For systemd, the start and terminal lines for the unit. |
-| Did it fail? | `Main process exited, code=exited, status=N`, `Failed with result '...'`, and `ActiveState` / `Result` / `ExecMainStatus` from `systemctl show`. |
+| Did it fail? | `Main process exited, code=exited, status=N`, `Failed with result '...'`, and `ActiveState` / `Result` from `systemctl show`. systemd's own verdict wins over the raw exit status, so a unit with `SuccessExitStatus=3` that exits 3 is healthy; `ExecMainStatus` decides only when the capture carries no `Result=`. |
 
 Supported log formats: traditional syslog (`Sep 18 03:00:01 host CRON[1234]: ...`) and
 the journalctl renderings `short-iso`, `short-iso-precise` and `short-full`. Traditional
@@ -211,6 +212,14 @@ Without `--until` (and without `--journal`) the end still *defaults* to the log'
 entry, which keeps an offline scan of a stand-alone log file reproducible. Pass
 `--until now` to check the tail as well.
 
+The window governs all three detectors, not just the missed ones: runs that started
+outside it are left out of the report, so `--since 1h` cannot surface an overlap from
+yesterday. The lower edge is widened by the tolerance, because a run that started a
+minute before `--since` is exactly the run that answers the first occurrence inside it.
+A unit that is *currently* `failed` from a run outside the window is reported as a
+diagnostic rather than a finding, so it does not move the exit code of a window it did
+not happen in.
+
 ## Known limitations
 
 - **Plain cron exit codes are not recoverable.** syslog does not carry them, so only
@@ -230,6 +239,9 @@ entry, which keeps an offline scan of a stand-alone log file reproducible. Pass
   occurrences are the union and a failure is reported once, not once per line.
 - `Persistent=yes` catch-up runs after a boot are reported at the time they actually ran,
   which may be well after the scheduled time.
+- A schedule that fires more often than 200 000 times across the requested window (a
+  per-minute cron entry with `--since` a year back) is reported as a diagnostic instead of
+  being enumerated; narrow the window to check it.
 - Linux only. Out of scope for v0.1: wrapping jobs, modifying schedules, push-style
   alerting.
 
