@@ -368,6 +368,55 @@ def _match_cron_runs(
     return runs
 
 
+def _runs_in_window(
+    runs: list[Run], window_start: datetime, window_end: datetime, tolerance: float
+) -> list[Run]:
+    """Keep the runs the window is about, for every detector alike.
+
+    ``--since``/``--until`` used to bound only the expected occurrences, so a
+    narrow window still reported overlaps and failures from the whole log file —
+    two different windows in one report.  The lower edge is widened by the
+    tolerance because a run that started just before ``--since`` is exactly the
+    run that answers the first occurrence inside it; missed detection therefore
+    sees the same runs it did before.
+    """
+    earliest = window_start - timedelta(seconds=tolerance)
+    return [run for run in runs if earliest <= run.start <= window_end]
+
+
+def _state_in_window(
+    job: Job,
+    state: systemd.UnitState | None,
+    window_start: datetime,
+    window_end: datetime,
+    diagnostics: list[Diagnostic],
+) -> systemd.UnitState | None:
+    """Drop a ``systemctl show`` failure that happened outside the window.
+
+    ``systemctl show`` reports the unit's state *now*, which may be the fallout
+    of a run from last month.  Counting that as a finding inside a ``--since 1h``
+    scan puts a problem in the report that the window says nothing about, so it
+    is demoted to a diagnostic (D-c33b95: only findings move the exit code).
+    Without a usable ``ExecMainExitTimestamp`` the failure cannot be dated and is
+    kept, since a currently-failed unit is the more useful report.
+    """
+    if state is None or not state.is_failed:
+        return state
+    exited_at = systemd.parse_timestamp(state.get("ExecMainExitTimestamp"))
+    if exited_at is None or window_start <= exited_at <= window_end:
+        return state
+    diagnostics.append(
+        Diagnostic(
+            job.id,
+            f"unit {state.unit} is Result={state.result or 'unknown'} from "
+            f"{exited_at.isoformat(sep=' ')}, which is outside the analysed window; "
+            "widen --since/--until to include it",
+            job.origin,
+        )
+    )
+    return None
+
+
 def _analyse_job(
     job: Job,
     options: ScanOptions,
@@ -387,6 +436,7 @@ def _analyse_job(
         runs = sorted(cron_runs, key=lambda run: run.start)
     else:
         runs = build_unit_runs(job.id, unit_events)
+    runs = _runs_in_window(runs, window_start, window_end, tolerance)
 
     # An occurrence is only judged once its tolerance has fully elapsed inside the
     # window; otherwise the very last scheduled run is always "missed".
@@ -423,7 +473,11 @@ def _analyse_job(
                 )
             )
     if FAILURE not in options.ignore:
-        findings.extend(detect_failures(job, runs, state))
+        findings.extend(
+            detect_failures(job, runs, _state_in_window(
+                job, state, window_start, window_end, diagnostics
+            ))
+        )
     return JobReport(
         job=job,
         schedule_ok=schedule_ok,

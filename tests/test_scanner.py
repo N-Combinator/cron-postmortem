@@ -287,3 +287,84 @@ def test_a_timer_with_two_calendars_expects_both_and_reports_once(tmp_path):
     assert report.expected == 2
     # One missed 04:00 occurrence and exactly one failure, not one per calendar.
     assert result.counts() == {MISSED: 1, OVERLAP: 0, FAILURE: 1}
+
+
+def test_the_window_bounds_overlaps_and_failures_too(tmp_path):
+    """--since/--until used to bound only the expected occurrences."""
+    show = tmp_path / "show.txt"
+    show.write_text(
+        "Id=nightly.timer\nUnit=nightly.service\nAccuracyUSec=1min\n"
+        "TimersCalendar={ OnCalendar=*-*-* 03:00:00 ; next_elapse=n/a }\n"
+        "\nId=nightly.service\nDescription=Nightly job\nActiveState=failed\n"
+        "Result=exit-code\nExecMainStatus=1\n"
+        "ExecMainExitTimestamp=Fri 2026-09-18 01:00:20 CEST\n"
+    )
+    log = tmp_path / "journal.log"
+    log.write_text(
+        # 01:00 — a failed, overlapping pair from before the window.
+        "2026-09-18T01:00:00+0200 h systemd[1]: Starting nightly.service - Nightly job...\n"
+        "2026-09-18T01:00:10+0200 h systemd[1]: Starting nightly.service - Nightly job...\n"
+        "2026-09-18T01:00:20+0200 h systemd[1]: nightly.service: "
+        "Main process exited, code=exited, status=1/FAILURE\n"
+        "2026-09-18T01:00:20+0200 h systemd[1]: nightly.service: Failed with result 'exit-code'.\n"
+        "2026-09-18T01:00:30+0200 h systemd[1]: nightly.service: Deactivated successfully.\n"
+        # 03:00 — the healthy run the window is about.
+        "2026-09-18T03:00:01+0200 h systemd[1]: Starting nightly.service - Nightly job...\n"
+        "2026-09-18T03:00:40+0200 h systemd[1]: nightly.service: Deactivated successfully.\n"
+    )
+    result = scan(options(
+        show_paths=[show],
+        log_paths=[log],
+        since=datetime(2026, 9, 18, 2, 0),
+        until=datetime(2026, 9, 18, 4, 0),
+    ))
+    report = result.job_reports[0]
+    assert [run.start for run in report.runs] == [datetime(2026, 9, 18, 3, 0, 1)]
+    assert result.counts() == {MISSED: 0, OVERLAP: 0, FAILURE: 0}
+    assert result.problems == 0
+    # The unit is still in a failed state; that is a coverage note, not a finding.
+    assert any("outside the analysed window" in diag.message for diag in result.diagnostics)
+
+
+def test_a_run_just_before_the_window_still_answers_its_occurrence(tmp_path):
+    crontab = tmp_path / "root"
+    crontab.write_text("0 * * * * /bin/collect\n")
+    log = tmp_path / "syslog"
+    log.write_text(
+        "Sep 18 02:59:30 h CRON[1]: (root) CMD (/bin/collect)\n"
+        "Sep 18 04:00:01 h CRON[2]: (root) CMD (/bin/collect)\n"
+    )
+    result = scan(options(
+        crontab_paths=[crontab],
+        log_paths=[log],
+        since=datetime(2026, 9, 18, 3, 0),
+        until=datetime(2026, 9, 18, 4, 30),
+    ))
+    # 03:00 was served by a run that started 30s early, outside --since.
+    assert result.findings == []
+
+
+def test_a_started_line_does_not_invent_an_overlap(tmp_path):
+    """A Type=notify unit logs Starting and Started for one activation."""
+    show = tmp_path / "show.txt"
+    show.write_text(
+        "Id=api-sync.timer\nUnit=api-sync.service\nAccuracyUSec=1min\n"
+        "TimersCalendar={ OnCalendar=*-*-* *:00:00 ; next_elapse=n/a }\n"
+        "\nId=api-sync.service\nDescription=Sync the API\nActiveState=inactive\n"
+        "Result=success\nExecMainStatus=0\nType=notify\n"
+    )
+    log = tmp_path / "journal.log"
+    log.write_text("".join(
+        f"2026-09-18T{hour:02d}:00:01+0200 h systemd[1]: "
+        "Starting api-sync.service - Sync the API...\n"
+        f"2026-09-18T{hour:02d}:00:04+0200 h systemd[1]: "
+        "Started api-sync.service - Sync the API.\n"
+        f"2026-09-18T{hour:02d}:20:00+0200 h systemd[1]: "
+        "api-sync.service: Deactivated successfully.\n"
+        for hour in (3, 4, 5)
+    ))
+    result = scan(options(show_paths=[show], log_paths=[log]))
+    report = result.job_reports[0]
+    assert [run.start.hour for run in report.runs] == [3, 4, 5]
+    assert [run.duration for run in report.runs] == [1199.0, 1199.0, 1199.0]
+    assert result.counts() == {MISSED: 0, OVERLAP: 0, FAILURE: 0}
