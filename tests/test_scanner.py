@@ -139,18 +139,46 @@ def test_ignoring_a_kind_drops_it_from_the_findings():
     assert result.counts() == {MISSED: 0, OVERLAP: 0, FAILURE: 1}
 
 
-def test_an_explicit_window_wider_than_the_log_is_clamped():
+def test_a_window_starting_before_the_log_is_clamped_at_the_start_only():
     result = scan(options(
         crontab_paths=[FIXTURES / "etc" / "crontab"],
         log_paths=[FIXTURES / "syslog-cron.log"],
         since=datetime(2026, 9, 17, 0, 0),
         until=datetime(2026, 9, 18, 12, 0),
     ))
+    # Clamping the start is what keeps yesterday's un-logged runs from all
+    # looking missed; the end stays where it was asked for.
     assert result.window_start == datetime(2026, 9, 18, 2, 50, 0)
-    assert result.window_end == datetime(2026, 9, 18, 5, 33, 10)
-    assert sum("clamped" in diag.message for diag in result.diagnostics) == 2
-    # Clamping is what keeps yesterday's un-logged runs from all looking missed.
-    assert result.counts()[MISSED] == 1
+    assert result.window_end == datetime(2026, 9, 18, 12, 0)
+    assert sum("clamped" in diag.message for diag in result.diagnostics) == 1
+
+
+def test_a_log_that_stops_mid_window_reports_the_silent_tail_as_missed(tmp_path):
+    """The cron daemon dying at 06:00 is the failure this tool exists to catch."""
+    crontab = tmp_path / "root"
+    crontab.write_text("*/30 * * * * /bin/collect\n")
+    log = tmp_path / "syslog"
+    log.write_text("".join(
+        f"Sep 18 {hour:02d}:{minute:02d}:01 h CRON[{hour}{minute}]: "
+        "(root) CMD (/bin/collect)\n"
+        for hour in range(0, 7) for minute in (0, 30)
+        if (hour, minute) <= (6, 0)
+    ))
+    result = scan(options(
+        crontab_paths=[crontab],
+        log_paths=[log],
+        since=datetime(2026, 9, 17, 12, 0),
+        until=NOW,
+    ))
+    assert result.window_end == NOW
+    # 06:30 through 11:30 inclusive, every 30 minutes.
+    missed = [f.when for f in result.findings if f.kind == MISSED]
+    assert missed == [
+        datetime(2026, 9, 18, hour, minute)
+        for hour in range(6, 12) for minute in (0, 30)
+        if (hour, minute) >= (6, 30)
+    ]
+    assert result.problems == 11
 
 
 def test_a_narrower_window_limits_what_is_checked():

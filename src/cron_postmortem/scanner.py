@@ -239,7 +239,17 @@ def _collect_logs(
 def _resolve_window(
     options: ScanOptions, scan_data: LogScan, diagnostics: list[Diagnostic]
 ) -> tuple[datetime, datetime]:
-    """Pick the analysis window, never claiming coverage the log does not have."""
+    """Pick the analysis window.
+
+    The *start* is clamped to the log's span: runs from before the log begins are
+    unknowable (rotation, truncation) and reporting them all as missed is noise.
+    The *end* is never clamped.  Silence at the end of the window is the outage
+    this tool exists to catch — a dead cron daemon, a box that went down, broken
+    logging — so those occurrences must be reported as missed and move the exit
+    code, not be defined away.  Without ``--until`` and without the journal the
+    end still *defaults* to the last log line, which keeps an offline scan of a
+    stand-alone log file reproducible.
+    """
     if options.since is not None:
         start = options.since
     elif scan_data.first_timestamp is not None:
@@ -267,11 +277,12 @@ def _resolve_window(
         diagnostics.append(
             Diagnostic(
                 None,
-                f"requested window ends {end.isoformat(sep=' ')} but the log only "
-                f"covers up to {covered_end.isoformat(sep=' ')}; window clamped",
+                f"the log's last entry is {covered_end.isoformat(sep=' ')} but the "
+                f"window runs to {end.isoformat(sep=' ')}; occurrences after the last "
+                "entry are reported as missed — a silent tail is usually one outage, "
+                "not one failure per occurrence",
             )
         )
-        end = covered_end
     if end < start:
         end = start
     return start, end

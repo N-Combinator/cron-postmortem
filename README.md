@@ -199,9 +199,18 @@ syslog carries no year, so it is inferred from `--now` with December→January r
 Timestamps are compared as **local wall-clock time**, because that is what cron and
 systemd timers fire against; a UTC offset in a log line is dropped rather than converted.
 
-If the requested window is wider than the log actually covers, it is clamped to the
-log's span and a diagnostic says so — otherwise every run from before the log started
-would look missed.
+If the requested window starts before the log does, the **start** is clamped to the
+log's first entry and a diagnostic says so — otherwise every run from before the log
+was rotated would look missed. The **end** is never clamped: silence at the end of the
+window is exactly the outage this tool is for (dead cron daemon, box down, logging
+broken), so those occurrences are reported as missed and move the exit code. A
+diagnostic points out where the log stopped, so one silent tail reads as one outage
+rather than N unrelated failures.
+
+Without `--until` (and without `--journal`) the end still *defaults* to the log's last
+entry, which keeps an offline scan of a stand-alone log file reproducible. Pass
+`--until now` to check the tail as well.
+
 
 ## Known limitations
 
