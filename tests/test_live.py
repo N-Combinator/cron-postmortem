@@ -187,3 +187,19 @@ def test_the_cli_can_mix_a_given_crontab_with_the_live_journal(host, etc, tmp_pa
     assert code == cli.EXIT_OK
     assert "No problems found." in out
     assert out.count("| `cron:") == 1
+
+
+def test_a_discovered_spool_crontab_is_still_owned_by_its_filename(host, etc):
+    """In the spool the filename *is* the owner, dot in it or not.
+
+    The stricter rule that stops a collected file being attributed to its
+    capture name must not reach the one place where cron itself reads the
+    owner off the name.
+    """
+    (etc / "spool" / "john.doe").write_text("0 3 * * * /bin/backup\n")
+
+    result = scan(live_options())
+
+    owners = {report.job.user for report in result.job_reports if report.job.source == "cron"}
+    assert "john.doe" in owners
+    assert not any("attributed to" in diag.message for diag in result.diagnostics)

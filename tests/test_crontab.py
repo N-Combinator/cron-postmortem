@@ -58,8 +58,49 @@ def test_format_detection_follows_the_path():
 
 
 def test_default_user_comes_from_the_filename():
-    assert crontab.default_user_for(Path("/var/spool/cron/crontabs/www-data")) == "www-data"
+    spool = Path("/var/spool/cron/crontabs/www-data")
+    assert crontab.default_user_for(spool, trust_filename=True) == "www-data"
+    # A username may contain a dot, and in the spool the name is the owner.
+    assert crontab.default_user_for(
+        Path("/var/spool/cron/crontabs/john.doe"), trust_filename=True
+    ) == "john.doe"
     assert crontab.default_user_for(Path("/tmp/Some File.txt")) == "root"
+
+
+def test_a_collected_crontab_is_not_attributed_to_its_capture_name():
+    """The filename is the owner in the spool, not on the command line.
+
+    A file named after the capture rather than after its owner used to invent a
+    user nothing in the log can match, and every occurrence came back missed.
+    """
+    for name in ("hang.crontab", "web01.crontab", "root.txt", "crontab", "cron"):
+        assert crontab.default_user_for(Path("/tmp") / name) == "root"
+    # A bare plausible username is still believed - that is how people pass a
+    # crontab copied straight out of the spool.
+    assert crontab.default_user_for(Path("/tmp/www-data")) == "www-data"
+    assert crontab.default_user_for(Path("/tmp/root")) == "root"
+
+
+def test_an_attributed_crontab_says_which_user_it_picked(tmp_path):
+    collected = tmp_path / "web01.crontab"
+    collected.write_text("* * * * * /usr/local/bin/poll.sh\n")
+
+    jobs, problems = crontab.load_crontab_file(collected)
+
+    assert [job.user for job in jobs] == ["root"]
+    assert len(problems) == 1
+    assert "attributed to 'root'" in problems[0]
+    assert "--crontab-user" in problems[0]
+
+
+def test_an_explicit_user_silences_the_attribution_note(tmp_path):
+    collected = tmp_path / "web01.crontab"
+    collected.write_text("* * * * * /usr/local/bin/poll.sh\n")
+
+    jobs, problems = crontab.load_crontab_file(collected, user_override="alice")
+
+    assert [job.user for job in jobs] == ["alice"]
+    assert problems == []
 
 
 def test_load_from_disk_autodetects(fixtures):

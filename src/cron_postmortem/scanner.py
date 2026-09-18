@@ -309,14 +309,20 @@ def _collect_jobs(
     options: ScanOptions, diagnostics: list[Diagnostic], sources: dict[str, list[str]]
 ) -> tuple[list[Job], list[systemd.UnitState]]:
     jobs: list[Job] = []
-    paths = list(options.crontab_paths)
+    # The filename is the owner only for the files discovery found in a spool
+    # directory; a path given on the command line is named by whoever collected
+    # it (see crontab.default_user_for).
+    paths: list[tuple[Path, bool]] = [(path, False) for path in options.crontab_paths]
     if options.discover:
         discovered, problems = crontab_mod.discover_crontab_files()
-        paths.extend(discovered)
+        paths.extend((path, True) for path in discovered)
         diagnostics.extend(Diagnostic(None, problem) for problem in problems)
-    for path in paths:
+    for path, trust_filename in paths:
         found, problems = crontab_mod.load_crontab_file(
-            path, options.crontab_format, options.crontab_user
+            path,
+            options.crontab_format,
+            options.crontab_user,
+            trust_filename=trust_filename,
         )
         jobs.extend(found)
         sources["crontabs"].append(str(path))

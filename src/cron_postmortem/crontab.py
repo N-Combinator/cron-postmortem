@@ -16,6 +16,13 @@ SPOOL_DIRS = (Path("/var/spool/cron/crontabs"), Path("/var/spool/cron"))
 
 _ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\s*=")
 _USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_.\-]*\$?$")
+# A username may legally contain a dot, but a collected file is far more often
+# named after the capture than after its owner, so off the spool a dot reads as
+# an extension and the name is not believed.
+_COLLECTED_NAME_RE = re.compile(r"^[a-z_][a-z0-9_\-]*\$?$")
+# Names a collected crontab is given when it is named after the thing it is
+# rather than after the user who owns it.
+_GENERIC_NAMES = frozenset({"cron", "crontab", "crontabs", "cronjobs", "jobs", "tab"})
 # run-parts drop-in files whose names cron itself ignores.
 _IGNORED_NAME_RE = re.compile(r"(\.(dpkg|rpm)[^.]*|~|\.bak|\.swp)$")
 
@@ -25,12 +32,31 @@ def normalize_command(command: str) -> str:
     return " ".join(command.split())
 
 
-def default_user_for(path: Path) -> str:
-    """User to attribute a user-format crontab to, from its filename."""
+def default_user_for(path: Path, *, trust_filename: bool = False) -> str:
+    """User to attribute a user-format crontab to, from its filename.
+
+    In a spool directory the filename *is* the owner's name - that is how cron
+    itself decides who runs the entries - so discovery passes
+    ``trust_filename=True`` and the name is taken as given.
+
+    A path named on the command line is a file somebody collected, and it is
+    usually called after the capture rather than after its owner
+    (``web01.crontab``, ``root.txt``, ``crontab``).  Attributing those entries
+    to a user that does not exist is not a cosmetic slip: the log only ever says
+    ``(user) CMD``, so no observed run can match and every occurrence is
+    reported as missed.  Off the spool the name is therefore believed only when
+    it is a bare plausible username, and cron's own default of ``root`` - the
+    owner of most crontabs anyone bothers to collect - is used otherwise.
+    ``--crontab-user`` overrides both.
+    """
     name = path.name
-    if _USERNAME_RE.match(name):
+    if not _USERNAME_RE.match(name):
+        return "root"
+    if trust_filename:
         return name
-    return "root"
+    if not _COLLECTED_NAME_RE.match(name) or name in _GENERIC_NAMES:
+        return "root"
+    return name
 
 
 def is_system_format(path: Path) -> bool:
@@ -118,9 +144,17 @@ def _split_entry(line: str, system_format: bool, default_user: str) -> tuple[str
 
 
 def load_crontab_file(
-    path: Path, format_override: str = "auto", user_override: str | None = None
+    path: Path,
+    format_override: str = "auto",
+    user_override: str | None = None,
+    *,
+    trust_filename: bool = False,
 ) -> tuple[list[Job], list[str]]:
-    """Read one crontab file from disk."""
+    """Read one crontab file from disk.
+
+    ``trust_filename`` says the file was found in a spool directory, where the
+    name is the owner's; see :func:`default_user_for`.
+    """
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
@@ -129,8 +163,18 @@ def load_crontab_file(
         system_format = is_system_format(path)
     else:
         system_format = format_override == "system"
-    user = user_override or default_user_for(path)
-    return parse_crontab(text, str(path), system_format, user)
+    user = user_override or default_user_for(path, trust_filename=trust_filename)
+    jobs, problems = parse_crontab(text, str(path), system_format, user)
+    if jobs and not system_format and user_override is None and path.name != user:
+        # Say which user the entries were attributed to whenever the filename
+        # was not taken at face value: the whole match against the log hangs on
+        # it, and getting it wrong looks exactly like a job that never ran.
+        problems.append(
+            f"{path}: user-format crontab whose filename is not a username; "
+            f"entries attributed to {user!r} - pass --crontab-user if they "
+            "belong to somebody else"
+        )
+    return jobs, problems
 
 
 def discover_crontab_files() -> tuple[list[Path], list[str]]:
