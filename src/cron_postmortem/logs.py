@@ -30,6 +30,10 @@ MONTHS = {
 # the same second, so a small window is enough to pair them.
 SESSION_PAIR_WINDOW = timedelta(seconds=5)
 
+# Stand-in year for year-less syslog timestamps, replaced once the real year is
+# known.  It must be a leap year so that "Feb 29" is representable.
+PLACEHOLDER_YEAR = 1904
+
 _SYSLOG_TS = re.compile(
     r"^(?P<mon>[A-Za-z]{3})\s+(?P<day>\d{1,2})\s+"
     r"(?P<hour>\d{1,2}):(?P<minute>\d{2}):(?P<second>\d{2})\s+"
@@ -118,12 +122,22 @@ class LogScan:
 
 
 def _strip_timestamp(line: str) -> tuple[datetime | None, str, bool]:
-    """Return (timestamp, remainder, needs_year).  Year is 1900 when unknown."""
+    """Return (timestamp, remainder, needs_year).
+
+    Traditional syslog carries no year, so the placeholder year is
+    ``PLACEHOLDER_YEAR`` - a leap year, so that a ``Feb 29`` line survives until
+    :func:`parse_lines` can date it properly.  A day or time that is out of range
+    for its month makes the line undatable, so it is skipped like any other
+    unparseable line rather than aborting the scan.
+    """
     match = _ISO_TS.match(line)
     if match:
-        stamp = datetime.strptime(
-            f"{match.group('date')} {match.group('time')}", "%Y-%m-%d %H:%M:%S"
-        )
+        try:
+            stamp = datetime.strptime(
+                f"{match.group('date')} {match.group('time')}", "%Y-%m-%d %H:%M:%S"
+            )
+        except ValueError:
+            return None, line, False
         rest = line[match.end():]
         rest = _TZ_ABBREV.sub("", rest)
         return stamp, rest, False
@@ -132,14 +146,17 @@ def _strip_timestamp(line: str) -> tuple[datetime | None, str, bool]:
         month = MONTHS.get(match.group("mon").lower())
         if month is None:
             return None, line, False
-        stamp = datetime(
-            1900,
-            month,
-            int(match.group("day")),
-            int(match.group("hour")),
-            int(match.group("minute")),
-            int(match.group("second")),
-        )
+        try:
+            stamp = datetime(
+                PLACEHOLDER_YEAR,
+                month,
+                int(match.group("day")),
+                int(match.group("hour")),
+                int(match.group("minute")),
+                int(match.group("second")),
+            )
+        except ValueError:  # e.g. "Sep 99" or "Feb 30"
+            return None, line, False
         return stamp, line[match.end():], True
     return None, line, False
 
@@ -164,7 +181,8 @@ def parse_lines(
     Traditional syslog carries no year.  Lines are assumed to be in chronological
     order: the year starts at ``reference``'s year and rolls forward on a
     backwards jump (December -> January); if that puts entries in the future the
-    whole file is shifted back a year.
+    whole file is shifted back a year.  A ``Feb 29`` line landing on a non-leap
+    year is pulled back to the 28th by :func:`_with_year`.
     """
     reference = reference or datetime.now()
     out: list[LogLine] = []

@@ -122,6 +122,31 @@ def test_old_style_description_lines_need_the_description_map():
     assert {event.unit for event in resolved.unit_events} == {"certbot.service"}
 
 
+def test_leap_day_syslog_line_is_dated_not_crashed():
+    # Year-less syslog is held in a placeholder year until the real one is known;
+    # that placeholder must be a leap year or Feb 29 is unrepresentable.
+    text = "Feb 29 03:00:01 web01 CRON[10011]: (root) CMD (/bin/true)\n"
+    result = scan(text, reference=datetime(2024, 3, 1, 12, 0))
+    assert [run.start for run in result.cron_runs] == [datetime(2024, 2, 29, 3, 0, 1)]
+
+
+def test_leap_day_falls_back_to_the_28th_in_a_non_leap_year():
+    text = "Feb 29 03:00:01 web01 CRON[10011]: (root) CMD (/bin/true)\n"
+    result = scan(text, reference=datetime(2026, 3, 1, 12, 0))
+    assert [run.start for run in result.cron_runs] == [datetime(2026, 2, 28, 3, 0, 1)]
+
+
+def test_impossible_dates_are_skipped_not_fatal():
+    text = (
+        "Sep 99 03:00:01 web01 CRON[1]: (root) CMD (/bin/skipped)\n"
+        "Feb 30 03:00:01 web01 CRON[2]: (root) CMD (/bin/skipped)\n"
+        "2026-09-31 03:00:01 web01 CRON[3]: (root) CMD (/bin/skipped)\n"
+        "Sep 18 03:00:01 web01 CRON[4]: (root) CMD (/bin/kept)\n"
+    )
+    result = scan(text)
+    assert [run.command for run in result.cron_runs] == ["/bin/kept"]
+
+
 def test_scan_records_the_covered_window(fixtures):
     text = (fixtures / "syslog-cron.log").read_text()
     result = scan(text)
