@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -179,6 +179,7 @@ def _collect_jobs(
         jobs.extend(found)
         sources["crontabs"].append(str(path))
         diagnostics.extend(Diagnostic(None, problem, str(path)) for problem in problems)
+    jobs = _merge_cron_duplicates(jobs)
 
     unit_states: list[systemd.UnitState] = []
     for path in options.show_paths:
@@ -200,6 +201,43 @@ def _collect_jobs(
     jobs.extend(timer_jobs)
     diagnostics.extend(Diagnostic(None, problem) for problem in problems)
     return jobs, unit_states
+
+
+def _merge_cron_duplicates(jobs: list[Job]) -> list[Job]:
+    """Fold crontab entries running the same command as the same user into one job.
+
+    A ``CMD`` log line carries only the user and the command, so two crontab lines
+    that schedule the same command are indistinguishable in the log and cannot be
+    told apart after the fact.  They become one job whose occurrences are the union
+    of both schedules — the same treatment a timer with several ``OnCalendar=``
+    lines gets.  Keeping them separate would hand every observed run to the first
+    entry and report all of the second entry's occurrences as missed.
+    """
+    merged: list[Job] = []
+    position_of: dict[tuple[str, str], int] = {}
+    for job in jobs:
+        if job.source != CRON or job.command is None:
+            merged.append(job)
+            continue
+        key = (job.user or "", job.command)
+        position = position_of.get(key)
+        if position is None:
+            position_of[key] = len(merged)
+            merged.append(job)
+            continue
+        first = merged[position]
+        schedules = first.schedule_list + tuple(
+            expression
+            for expression in job.schedule_list
+            if expression not in first.schedule_list
+        )
+        merged[position] = replace(
+            first,
+            schedule=" ; ".join(schedules),
+            schedules=schedules,
+            origin=f"{first.origin}, {job.origin}",
+        )
+    return merged
 
 
 def _collect_logs(
@@ -292,22 +330,22 @@ def _match_cron_runs(
     jobs: list[Job], scan_data: LogScan, diagnostics: list[Diagnostic]
 ) -> dict[str, list[Run]]:
     """Attach observed ``CMD`` lines to the crontab entry that produced them."""
-    by_key: dict[tuple[str, str], list[Job]] = {}
+    by_key: dict[tuple[str, str], Job] = {}
     for job in jobs:
         if job.source != CRON or job.command is None:
             continue
-        by_key.setdefault((job.user or "", job.command), []).append(job)
+        # Entries sharing a key were already folded into one job by
+        # _merge_cron_duplicates; setdefault only guards against a stray caller.
+        by_key.setdefault((job.user or "", job.command), job)
 
     runs: dict[str, list[Run]] = {}
     unmatched: list[str] = []
     for observed in scan_data.cron_runs:
         key = (observed.user, crontab_mod.normalize_command(observed.command))
-        candidates = by_key.get(key)
-        if not candidates:
+        job = by_key.get(key)
+        if job is None:
             unmatched.append(f"({observed.user}) {observed.command}")
             continue
-        # Duplicate crontab entries share a key; the first one owns the run.
-        job = candidates[0]
         runs.setdefault(job.id, []).append(
             Run(
                 job_id=job.id,

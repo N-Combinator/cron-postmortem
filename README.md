@@ -211,12 +211,14 @@ Without `--until` (and without `--journal`) the end still *defaults* to the log'
 entry, which keeps an offline scan of a stand-alone log file reproducible. Pass
 `--until now` to check the tail as well.
 
-
 ## Known limitations
 
 - **Plain cron exit codes are not recoverable.** syslog does not carry them, so only
   missed/overlap detection applies to cron jobs. This is a limit of the data source, not
   a bug; use a systemd timer if you need exit-code visibility.
+- Two crontab lines running the same command as the same user are analysed as **one**
+  job with both schedules, because a `CMD` log line carries only the user and the
+  command and cannot be attributed to one line rather than the other.
 - Cron run durations need `pam_unix(cron:session)` lines. Without them, runs have no end
   and overlaps cannot be detected; the report says so in the diagnostics.
 - `OnCalendar=` support covers the shorthands, weekday filters, lists, `a..b` ranges and

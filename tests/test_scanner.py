@@ -181,6 +181,35 @@ def test_a_log_that_stops_mid_window_reports_the_silent_tail_as_missed(tmp_path)
     assert result.problems == 11
 
 
+def test_two_crontab_entries_for_one_command_are_one_job(tmp_path):
+    """Same command twice in /etc/cron.d is ordinary, not two half-broken jobs."""
+    crontab = tmp_path / "cron.d" / "reports"
+    crontab.parent.mkdir()
+    crontab.write_text(
+        "0 8 * * * root /usr/local/bin/warmup.sh\n"
+        "0 9 * * * root /usr/local/bin/report.sh\n"
+        "0 18 * * * root /usr/local/bin/report.sh\n"
+    )
+    log = tmp_path / "syslog"
+    log.write_text(
+        "Sep 18 08:00:01 h CRON[10]: (root) CMD (/usr/local/bin/warmup.sh)\n"
+        "Sep 18 09:00:01 h CRON[11]: (root) CMD (/usr/local/bin/report.sh)\n"
+        "Sep 18 18:00:01 h CRON[12]: (root) CMD (/usr/local/bin/report.sh)\n"
+    )
+    result = scan(options(
+        crontab_paths=[crontab],
+        log_paths=[log],
+        until=datetime(2026, 9, 18, 23, 0),
+        now=datetime(2026, 9, 18, 23, 0),
+    ))
+    assert len(result.job_reports) == 2
+    report = next(r for r in result.job_reports if r.job.command.endswith("report.sh"))
+    assert report.job.id == "cron:root:/usr/local/bin/report.sh"
+    assert report.job.schedules == ("0 9 * * *", "0 18 * * *")
+    assert (report.expected, len(report.runs)) == (2, 2)
+    assert result.findings == []
+
+
 def test_a_narrower_window_limits_what_is_checked():
     result = scan(options(
         crontab_paths=[FIXTURES / "etc" / "crontab"],
