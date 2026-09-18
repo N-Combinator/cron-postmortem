@@ -1,0 +1,106 @@
+Id=backup-db.timer
+Description=Nightly database backup timer
+LoadState=loaded
+ActiveState=active
+SubState=waiting
+Unit=backup-db.service
+Persistent=yes
+AccuracyUSec=1min
+RandomizedDelayUSec=0
+TimersCalendar={ OnCalendar=*-*-* 04:00:00 ; next_elapse=Sat 2026-09-19 04:00:00 CEST }
+NextElapseUSecRealtime=Sat 2026-09-19 04:00:00 CEST
+
+Id=backup-db.service
+Description=Nightly database backup
+LoadState=loaded
+ActiveState=failed
+SubState=failed
+Result=exit-code
+ExecMainStatus=1
+ExecMainCode=1
+ExecMainStartTimestamp=Fri 2026-09-18 04:00:03 CEST
+ExecMainExitTimestamp=Fri 2026-09-18 04:00:15 CEST
+NRestarts=0
+Type=oneshot
+
+Id=certbot.timer
+Description=Run certbot twice daily
+LoadState=loaded
+ActiveState=active
+SubState=waiting
+Unit=certbot.service
+Persistent=yes
+AccuracyUSec=1min
+RandomizedDelayUSec=0
+TimersCalendar={ OnCalendar=*-*-* 03:30:00 ; next_elapse=Sat 2026-09-19 03:30:00 CEST }
+
+Id=certbot.service
+Description=Certbot renewal
+LoadState=loaded
+ActiveState=inactive
+SubState=dead
+Result=success
+ExecMainStatus=0
+ExecMainCode=1
+ExecMainStartTimestamp=Fri 2026-09-18 05:59:30 CEST
+ExecMainExitTimestamp=Fri 2026-09-18 05:59:40 CEST
+NRestarts=0
+Type=oneshot
+
+Id=logship.timer
+Description=Ship logs to archive timer
+LoadState=loaded
+ActiveState=active
+SubState=waiting
+Unit=logship.service
+Persistent=no
+AccuracyUSec=1min
+RandomizedDelayUSec=0
+TimersCalendar={ OnCalendar=*-*-* *:30:00 ; next_elapse=Fri 2026-09-18 06:30:00 CEST }
+
+Id=logship.service
+Description=Ship logs to archive
+LoadState=loaded
+ActiveState=inactive
+SubState=dead
+Result=success
+ExecMainStatus=0
+ExecMainCode=1
+ExecMainStartTimestamp=Fri 2026-09-18 05:30:01 CEST
+ExecMainExitTimestamp=Fri 2026-09-18 05:33:12 CEST
+NRestarts=0
+Type=simple
+
+Id=metrics-push.timer
+Description=Push metrics to collector timer
+LoadState=loaded
+ActiveState=active
+SubState=waiting
+Unit=metrics-push.service
+Persistent=no
+AccuracyUSec=1min
+RandomizedDelayUSec=0
+TimersCalendar={ OnCalendar=*-*-* *:00:00 ; next_elapse=Fri 2026-09-18 06:00:00 CEST }
+
+Id=metrics-push.service
+Description=Push metrics to collector
+LoadState=loaded
+ActiveState=inactive
+SubState=dead
+Result=success
+ExecMainStatus=0
+ExecMainCode=1
+ExecMainStartTimestamp=Fri 2026-09-18 05:00:02 CEST
+ExecMainExitTimestamp=Fri 2026-09-18 05:00:11 CEST
+NRestarts=0
+Type=oneshot
+
+Id=boot-cleanup.timer
+Description=Clean up after boot
+LoadState=loaded
+ActiveState=active
+SubState=waiting
+Unit=boot-cleanup.service
+AccuracyUSec=1min
+RandomizedDelayUSec=0
+TimersMonotonic={ OnBootUSec=15min ; next_elapse=n/a }

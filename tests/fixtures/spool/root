@@ -1,0 +1,3 @@
+# user crontab for root (no user column)
+MAILTO=""
+50 2 * * * /usr/local/bin/heartbeat.sh

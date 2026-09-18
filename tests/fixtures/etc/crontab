@@ -1,0 +1,9 @@
+# /etc/crontab: system-wide crontab
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+MAILTO=ops@example.com
+
+# m h  dom mon dow user      command
+0    3  *   *   *   root     /usr/local/bin/backup.sh
+*/30 *  *   *   *   root     /usr/local/bin/sync-metrics.sh
+17   *  *   *   *   www-data /usr/local/bin/rotate-cache.sh
