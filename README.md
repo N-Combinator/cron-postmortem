@@ -69,9 +69,9 @@ $ journalctl --since "24 hours ago" -o short-iso -u backup-db.service >> cron.lo
 
 | Option | Meaning |
 | --- | --- |
-| `--crontab PATH` | Crontab file to analyse (repeatable). Format is detected from the path. |
+| `--crontab PATH` | Crontab file to analyse (repeatable). Format is detected from the path; a user-format file is attributed to `root` unless the filename is a bare username. |
 | `--crontab-format {auto,user,system}` | Force whether crontabs carry a user column. |
-| `--crontab-user USER` | User to attribute user-format entries to. |
+| `--crontab-user USER` | User to attribute user-format entries to, overriding the filename. |
 | `--systemctl-show PATH` | Captured `systemctl show <units>` output (repeatable). |
 | `--log-file PATH` | syslog or `journalctl` output (repeatable). |
 | `--journal` / `--discover` | Read logs / schedules from this host. |
@@ -102,6 +102,7 @@ Markdown report, appears in `warnings` in the JSON, and counts towards exit code
 | `no-schedules` | Not one crontab entry or timer was found, so every detector had nothing to run against. | `1` |
 | `no-log-lines` | No log source was given, or nothing in it parsed as a cron/systemd log line — check the format and the syslog identifier. | `1` |
 | `unsupported-timezone` | An `OnCalendar=` value names a timezone (see the limitations); that timer is excluded from missed-run detection. | `1` |
+| `no-runs-matched` | The log is full of cron runs and not one of them belongs to a crontab entry — usually the wrong user (see below) or a log from another host. | `1` |
 | `empty-window` | The tolerance is longer than the window it applies to, so no scheduled run could be judged. | `2` / `1` |
 
 `empty-window` is the one warning that can exit `2`. An occurrence is only judged once
@@ -114,6 +115,16 @@ other, so they exit `2` and `--exit-zero` does *not* silence them — that flag 
 findings for a monitoring check, not a broken invocation. The same warning at exit `1`
 means one *timer's* own slack (`AccuracySec` + `RandomizedDelaySec`, added to
 `--tolerance`) outlasted an otherwise usable window: only that job went unchecked.
+
+`no-runs-matched` is the other half of the same idea. A cron run is attributed to a
+crontab entry by `(user, command)` — the log line carries nothing else — so an entry
+read as belonging to the wrong user can never match, and every one of its occurrences
+comes back as a missed run. That is why a user-format file passed to `--crontab` is
+attributed to `root` unless its name is a bare username: a collected crontab is usually
+named after the capture (`web01.crontab`, `root.txt`) rather than after its owner, and
+the name is only taken as the owner for the files found in a spool directory, where cron
+itself reads it that way. Pass `--crontab-user` when the entries belong to somebody
+else; a diagnostic names the user that was picked whenever the filename was not used.
 
 The summary line `Log lines read N, understood M` (`log_lines_total` /
 `log_lines_parsed` in JSON) is there for the in-between case: a log source that is only

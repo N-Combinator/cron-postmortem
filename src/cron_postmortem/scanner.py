@@ -173,7 +173,7 @@ def scan(options: ScanOptions) -> ScanResult:
     if empty_window is not None:
         warnings.append(empty_window)
 
-    cron_runs_by_job = _match_cron_runs(jobs, scan_data, diagnostics)
+    cron_runs_by_job = _match_cron_runs(jobs, scan_data, diagnostics, warnings)
     events_by_unit: dict[str, list] = {}
     for event in scan_data.unit_events:
         events_by_unit.setdefault(event.unit, []).append(event)
@@ -487,7 +487,10 @@ def _resolve_window(
 
 
 def _match_cron_runs(
-    jobs: list[Job], scan_data: LogScan, diagnostics: list[Diagnostic]
+    jobs: list[Job],
+    scan_data: LogScan,
+    diagnostics: list[Diagnostic],
+    warnings: list[ScanWarning],
 ) -> dict[str, list[Run]]:
     """Attach observed ``CMD`` lines to the crontab entry that produced them."""
     by_key: dict[tuple[str, str], Job] = {}
@@ -516,16 +519,60 @@ def _match_cron_runs(
         )
     if unmatched:
         unique = sorted(set(unmatched))
-        examples = ", ".join(unique[:UNMATCHED_EXAMPLES])
-        diagnostics.append(
-            Diagnostic(
-                None,
-                f"{len(unmatched)} cron run(s) in the log matched no known crontab "
-                f"entry ({len(unique)} distinct): {examples}"
-                + (" ..." if len(unique) > UNMATCHED_EXAMPLES else ""),
-            )
+        examples = ", ".join(unique[:UNMATCHED_EXAMPLES]) + (
+            " ..." if len(unique) > UNMATCHED_EXAMPLES else ""
         )
+        summary = (
+            f"{len(unmatched)} cron run(s) in the log matched no known crontab "
+            f"entry ({len(unique)} distinct): {examples}"
+        )
+        if by_key and not runs:
+            warnings.append(_nothing_matched_warning(by_key, scan_data, summary))
+        else:
+            diagnostics.append(Diagnostic(None, summary))
     return runs
+
+
+def _nothing_matched_warning(
+    by_key: dict[tuple[str, str], Job], scan_data: LogScan, summary: str
+) -> ScanWarning:
+    """Crontab entries, cron runs in the log, and not one pair between them.
+
+    Some entries never firing is a finding about those jobs; *every* entry
+    missing while the log is full of cron runs is a statement about the scan
+    itself, because the two sides are being compared on a key one of them does
+    not use - most often the user a ``--crontab`` file was attributed to, which
+    the log carries but the file does not.  Left as a diagnostic it does not
+    move the exit code and is easy to lose under the missed runs it invents, so
+    it is a warning: the report is not a verdict on these jobs.
+    """
+    observed_users = sorted({observed.user for observed in scan_data.cron_runs})
+    known_users = sorted({user for user, _ in by_key})
+    if set(observed_users).isdisjoint(known_users):
+        cause = (
+            f"the log's cron runs belong to {_names(observed_users)} but the "
+            f"crontab entries are attributed to {_names(known_users)}; a "
+            "user-format crontab is attributed to root unless its filename is "
+            "the owner's name, so pass --crontab-user"
+        )
+    else:
+        cause = (
+            f"the users match ({_names(known_users)}) but none of the commands "
+            "do; check that the crontab and the log come from the same host and "
+            "the same point in time"
+        )
+    return ScanWarning(
+        "no-runs-matched",
+        f"not one cron run in the log could be attributed to a crontab entry, "
+        f"so every scheduled cron run counts as missed: {cause}. {summary}",
+    )
+
+
+def _names(users: list[str]) -> str:
+    shown = ", ".join(users[:UNMATCHED_EXAMPLES])
+    if len(users) > UNMATCHED_EXAMPLES:
+        shown += " ..."
+    return f"user(s) {shown}"
 
 
 def _runs_in_window(

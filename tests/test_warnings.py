@@ -414,3 +414,117 @@ def test_a_timer_whose_slack_outlasts_the_window_warns_without_a_usage_error(tmp
     assert result.alerts is True
     assert "systemd:slow.timer" in result.warnings[0].message
     assert "3720s" in result.warnings[0].message
+
+
+# One command, running every minute for an hour, as the user named below: the
+# shape of an offline capture where the crontab and the log do line up.
+def _busy_log(user: str, command: str = "/usr/local/bin/poll.sh") -> str:
+    lines = []
+    for minute in range(60):
+        stamp = f"Sep 18 03:{minute:02d}:01"
+        end = f"Sep 18 03:{minute:02d}:06"
+        pid = 1000 + minute * 2
+        lines.append(
+            f"{stamp} h CRON[{pid}]: pam_unix(cron:session): "
+            f"session opened for user {user}"
+        )
+        lines.append(f"{stamp} h CRON[{pid + 1}]: ({user}) CMD ({command})")
+        lines.append(
+            f"{end} h CRON[{pid}]: pam_unix(cron:session): "
+            f"session closed for user {user}"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def busy_options(tmp_path, log_user: str, name: str = "collected.crontab", **kwargs):
+    crontab = tmp_path / name
+    crontab.write_text("* * * * * /usr/local/bin/poll.sh\n")
+    log = tmp_path / "syslog"
+    log.write_text(_busy_log(log_user))
+    kwargs.setdefault("now", NOW)
+    return ScanOptions(
+        crontab_paths=[crontab],
+        log_paths=[log],
+        since=datetime(2026, 9, 18, 3, 0, 0),
+        until=datetime(2026, 9, 18, 4, 0, 0),
+        **kwargs,
+    )
+
+
+def test_a_crontab_named_after_the_capture_still_matches_its_runs(tmp_path):
+    """The offline mode acceptance criterion 1 asks for, under any filename.
+
+    The crontab owner used to be taken from the filename whatever it was, so
+    the same file called ``collected.crontab`` instead of ``root`` was read as
+    belonging to a user the log never mentions: 0 runs and an hour of invented
+    missed runs.
+    """
+    result = scan(busy_options(tmp_path, log_user="root"))
+
+    assert [report.job.user for report in result.job_reports] == ["root"]
+    assert len(result.job_reports[0].runs) == 60
+    assert result.problems == 0
+    assert codes(result) == []
+    assert result.alerts is False
+
+
+def test_not_one_matching_run_is_a_warning_not_a_pile_of_missed_runs(tmp_path):
+    """The runs are all there, under a user no crontab entry claims.
+
+    Some entries never firing is a finding about those jobs; every entry
+    missing while the log is full of cron runs means the two sides are being
+    compared on a key one of them does not use, and the report is not a verdict
+    on the jobs at all.
+    """
+    result = scan(busy_options(tmp_path, log_user="alice"))
+
+    assert codes(result) == ["no-runs-matched"]
+    assert result.alerts is True
+    # Not the caller's arguments contradicting each other: exit 1, not 2.
+    assert result.usage_error is False
+    message = result.warnings[0].message
+    assert "user(s) alice" in message and "user(s) root" in message
+    assert "--crontab-user" in message
+    # The diagnostic it replaces is not also emitted.
+    assert [diag for diag in result.diagnostics if "matched no known" in diag.message] == []
+
+
+def test_naming_the_user_makes_the_warning_and_the_missed_runs_go_away(tmp_path):
+    result = scan(busy_options(tmp_path, log_user="alice", crontab_user="alice"))
+
+    assert codes(result) == []
+    assert len(result.job_reports[0].runs) == 60
+    assert result.problems == 0
+
+
+def test_some_runs_matching_stays_a_diagnostic(tmp_path):
+    """One stray command in the log is a coverage gap, not a broken scan."""
+    crontab = tmp_path / "root"
+    crontab.write_text("0 3 * * * /bin/true\n")
+    log = tmp_path / "syslog"
+    log.write_text(
+        HEALTHY_LOG
+        + "Sep 18 03:10:01 h CRON[9]: (root) CMD (/usr/lib/php/sessionclean)\n"
+    )
+
+    result = scan(ScanOptions(crontab_paths=[crontab], log_paths=[log], now=NOW))
+
+    assert codes(result) == []
+    assert any("matched no known" in diag.message for diag in result.diagnostics)
+
+
+def test_cron_runs_with_no_crontab_at_all_are_not_the_same_complaint(tmp_path):
+    """Scanning only timers over a journal that also carries cron lines."""
+    show = tmp_path / "show.txt"
+    show.write_text(TIMER_SLACK_SHOW)
+    log = tmp_path / "syslog"
+    log.write_text(_busy_log("root"))
+
+    result = scan(ScanOptions(
+        show_paths=[show], log_paths=[log], now=NOW,
+        since=datetime(2026, 9, 18, 3, 0, 0),
+        until=datetime(2026, 9, 18, 4, 0, 0),
+    ))
+
+    assert "no-runs-matched" not in codes(result)
+    assert any("matched no known" in diag.message for diag in result.diagnostics)
