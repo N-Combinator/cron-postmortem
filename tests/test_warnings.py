@@ -559,3 +559,55 @@ def test_one_out_of_order_line_does_not_invent_a_year_of_missed_runs(tmp_path):
         datetime(2026, 9, 18, 0, 0)
     ]
     assert codes(result) == []
+
+
+def test_a_year_wide_span_from_a_handful_of_lines_is_a_warning(tmp_path):
+    """A rollover that is plausible line by line but not as a whole.
+
+    A ~300-day backwards step is accepted as a new year, so an old archive
+    glued onto a current log still dates a year out.  Rather than enumerate a
+    year of occurrences in silence, the scan says the dates are not to be
+    trusted and moves the exit code.
+    """
+    crontab = tmp_path / "root"
+    crontab.write_text("0 3 * * * /bin/daily\n")
+    log = tmp_path / "syslog"
+    log.write_text(
+        "".join(
+            f"{month} 05 03:00:01 web01 CRON[1]: (root) CMD (/bin/daily)\n"
+            for month in ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul",
+                          "Aug", "Nov"]
+        )
+        + "Jan 05 03:00:01 web01 CRON[2]: (root) CMD (/bin/daily)\n"
+    )
+
+    result = scan(ScanOptions(crontab_paths=[crontab], log_paths=[log], now=NOW))
+
+    assert codes(result) == ["implausible-log-dates"]
+    warning = result.warnings[0]
+    assert warning.usage_error is False
+    assert str(log) in warning.message
+    assert "365 days" in warning.message
+    assert result.alerts is True
+
+
+def test_the_implausible_date_warning_is_not_a_usage_error(tmp_path):
+    """Exit 1, not 2: the input is odd, the arguments are not contradictory."""
+    crontab = tmp_path / "root"
+    crontab.write_text("0 3 * * * /bin/daily\n")
+    log = tmp_path / "syslog"
+    log.write_text(
+        "".join(
+            f"{month} 05 03:00:01 web01 CRON[1]: (root) CMD (/bin/daily)\n"
+            for month in ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul",
+                          "Aug", "Nov"]
+        )
+        + "Jan 05 03:00:01 web01 CRON[2]: (root) CMD (/bin/daily)\n"
+    )
+
+    code = cli.main([
+        "scan", "--crontab", str(crontab), "--log-file", str(log),
+        "--now", NOW_ARG, "--format", "json",
+    ])
+
+    assert code == 1

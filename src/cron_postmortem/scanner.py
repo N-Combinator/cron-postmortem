@@ -9,7 +9,12 @@ from pathlib import Path
 from . import __version__, calendarspec, cronspec, systemd
 from . import crontab as crontab_mod
 from .detect import build_unit_runs, detect_failures, detect_missed, detect_overlaps
-from .logs import LogScan, journal_cron_identifiers, scan_sources
+from .logs import (
+    ImplausibleDates,
+    LogScan,
+    journal_cron_identifiers,
+    scan_sources,
+)
 from .model import (
     CRON,
     FAILURE,
@@ -157,6 +162,8 @@ def scan(options: ScanOptions) -> ScanResult:
     )
     if scan_data.lines_parsed == 0:
         warnings.append(_no_log_lines_warning(options, scan_data, log_origins))
+    for suspect in scan_data.implausible_dates:
+        warnings.append(_implausible_dates_warning(suspect))
     for message in sorted(scan_data.unresolved_systemd_messages):
         diagnostics.append(
             Diagnostic(
@@ -266,6 +273,31 @@ def _no_log_lines_warning(
         "no-log-lines",
         f"no log lines parsed: {detail}; check the log format and that cron logs "
         "under one of " + ", ".join(journal_cron_identifiers()),
+    )
+
+
+def _implausible_dates_warning(suspect: ImplausibleDates) -> ScanWarning:
+    """The dates a year-less log was given are too wide to believe.
+
+    Traditional syslog carries no year, so one is inferred from the order of the
+    lines.  When that inference goes wrong the log does not complain - it simply
+    comes out dated a year apart, the window is clamped to the earliest dated
+    line, and every occurrence in the invented months is reported missed.  A
+    span of most of a year covered by fewer lines than it has days is the cheap
+    tell, so it is said out loud rather than enumerated in silence.
+    """
+    return ScanWarning(
+        "implausible-log-dates",
+        f"{suspect.origin}: {suspect.lines} year-less syslog line(s) were dated "
+        f"across {suspect.span_days} days "
+        f"({suspect.first.isoformat(sep=' ')} - {suspect.last.isoformat(sep=' ')}); "
+        "syslog carries no year, so one is inferred from the order of the lines "
+        "and a span that wide over so few lines usually means the order is not "
+        "chronological (an aggregated log, a stepped clock, or files glued "
+        "together) - the window starts at the earliest dated line, so any "
+        "missed runs before the log really begins are not real; pass "
+        "--since/--until to bound the window, or give each file as its own "
+        "--log-file, oldest first",
     )
 
 

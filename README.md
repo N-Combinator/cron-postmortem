@@ -103,6 +103,7 @@ Markdown report, appears in `warnings` in the JSON, and counts towards exit code
 | `no-log-lines` | No log source was given, or nothing in it parsed as a cron/systemd log line — check the format and the syslog identifier. | `1` |
 | `unsupported-timezone` | An `OnCalendar=` value names a timezone (see the limitations); that timer is excluded from missed-run detection. | `1` |
 | `no-runs-matched` | The log is full of cron runs and not one of them belongs to a crontab entry — usually the wrong user (see below) or a log from another host. | `1` |
+| `implausible-log-dates` | A year-less syslog source was dated across more than 300 days with fewer lines than that span has days — the inferred years are probably wrong. | `1` |
 | `empty-window` | The tolerance is longer than the window it applies to, so no scheduled run could be judged. | `2` / `1` |
 
 `empty-window` is the one warning that can exit `2`. An occurrence is only judged once
@@ -258,8 +259,10 @@ order, which is ordinary: a central syslog collecting hosts whose clocks differ 
 midnight, a backwards NTP correction, a VM snapshot restore. Reading one of those as a
 new year would date every earlier line twelve months out, and since the window starts at
 the log's first entry, one such line would fill the report with missed runs that never
-happened. Lines that carry their own year (journalctl's ISO formats, and `--journal`)
-are never affected by any of this.
+happened. As a backstop, a year-less source that still ends up spread over more than 300
+days with fewer lines than that span has days raises the `implausible-log-dates` warning
+instead of being enumerated in silence. Lines that carry their own year (journalctl's
+ISO formats, and `--journal`) are never affected by any of this.
 
 Cron is recognised under the identifiers `cron` and `crond` in either case — Debian logs
 as `CRON`, cronie as `CROND` — and `--journal` asks `journalctl -t` for all four

@@ -60,6 +60,11 @@ PLACEHOLDER_YEAR = 1904
 # as a rollover dates every line before it a year out.
 ROLLOVER_MIN_STEP = timedelta(days=300)
 
+# A year-less source whose inferred dates cover more than this, with fewer lines
+# than it has days, is not trusted enough to stay silent about: see
+# :func:`implausible_dates`.
+IMPLAUSIBLE_SPAN = timedelta(days=300)
+
 _SYSLOG_TS = re.compile(
     r"^(?P<mon>[A-Za-z]{3})\s+(?P<day>\d{1,2})\s+"
     r"(?P<hour>\d{1,2}):(?P<minute>\d{2}):(?P<second>\d{2})\s+"
@@ -103,6 +108,9 @@ class LogLine:
     message: str
     lineno: int
     origin: str
+    # True when the year in ``timestamp`` was inferred rather than read: the
+    # line came from year-less traditional syslog.
+    inferred_year: bool = False
 
 
 @dataclass
@@ -143,6 +151,20 @@ class UnitEvent:
 
 
 @dataclass
+class ImplausibleDates:
+    """A year-less source whose inferred dates cover an implausible span."""
+
+    origin: str
+    first: datetime
+    last: datetime
+    lines: int
+
+    @property
+    def span_days(self) -> int:
+        return (self.last - self.first).days
+
+
+@dataclass
 class LogScan:
     cron_runs: list[CronRun] = field(default_factory=list)
     unit_events: list[UnitEvent] = field(default_factory=list)
@@ -151,6 +173,7 @@ class LogScan:
     lines_parsed: int = 0
     lines_total: int = 0
     unresolved_systemd_messages: set[str] = field(default_factory=set)
+    implausible_dates: list[ImplausibleDates] = field(default_factory=list)
 
 
 def _strip_timestamp(line: str) -> tuple[datetime | None, str, bool]:
@@ -260,7 +283,7 @@ def parse_lines(
             out.append(
                 LogLine(
                     _with_year(stamp, stamp.year - shift),
-                    ident, pid, message, lineno, origin,
+                    ident, pid, message, lineno, origin, True,
                 )
             )
 
@@ -282,6 +305,31 @@ def _wrapped(candidate: datetime, previous: datetime) -> bool:
     snapshot restore, or a rotation glued together with ``cat``.
     """
     return previous - candidate >= ROLLOVER_MIN_STEP
+
+
+def implausible_dates(origin: str, parsed: list[LogLine]) -> ImplausibleDates | None:
+    """Flag a year-less source whose inferred dates cannot be trusted.
+
+    The year of a traditional syslog line is guessed from the order of the lines
+    around it, so a source that guessed wrong says nothing about it - it just
+    comes out with dates a year apart.  The cheapest thing that wrong dates all
+    look like is a span far wider than the lines could fill: a handful of lines
+    spread over most of a year means either a rollover that should not have been
+    taken or a file whose order cannot carry the inference, and either way the
+    window starts at the earliest dated line, so the report fills with missed
+    runs that never were.
+
+    Lines whose year was *read* (journalctl's ISO formats) are ignored - a wide
+    span there is data, not a guess.
+    """
+    inferred = [line for line in parsed if line.inferred_year]
+    if len(inferred) < 2:
+        return None
+    first, last = inferred[0].timestamp, inferred[-1].timestamp
+    span = last - first
+    if span <= IMPLAUSIBLE_SPAN or len(inferred) >= span.days:
+        return None
+    return ImplausibleDates(origin, first, last, len(inferred))
 
 
 def _with_year(stamp: datetime, year: int) -> datetime:
@@ -321,16 +369,23 @@ def scan_sources(
     """
     dated: list[tuple[int, LogLine]] = []
     lines_total = 0
+    suspect: list[ImplausibleDates] = []
     for index, (origin, lines) in enumerate(sources):
         lines_total += len(lines)
-        dated.extend(
-            (index, line) for line in parse_lines(lines, origin, reference)
-        )
+        parsed_source = parse_lines(lines, origin, reference)
+        dated.extend((index, line) for line in parsed_source)
+        issue = implausible_dates(origin, parsed_source)
+        if issue is not None:
+            suspect.append(issue)
     # Ties keep the order the sources were given in, then the order inside a file.
     dated.sort(key=lambda item: (item[1].timestamp, item[0], item[1].lineno))
     parsed = [line for _, line in dated]
 
-    scan = LogScan(lines_total=lines_total, lines_parsed=len(parsed))
+    scan = LogScan(
+        lines_total=lines_total,
+        lines_parsed=len(parsed),
+        implausible_dates=suspect,
+    )
     if parsed:
         scan.first_timestamp = parsed[0].timestamp
         scan.last_timestamp = parsed[-1].timestamp

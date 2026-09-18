@@ -92,6 +92,7 @@ def test_one_out_of_order_line_is_not_read_as_a_new_year():
         datetime(2026, 9, 18, 2, 0, 1),
     ]
     assert result.first_timestamp == datetime(2026, 9, 17, 23, 59, 59)
+    assert result.implausible_dates == []
 
 
 def test_a_backwards_step_of_a_few_weeks_is_not_a_new_year():
@@ -272,3 +273,69 @@ def test_an_empty_source_list_scans_nothing():
     result = logs.scan_sources([], reference=NOW)
     assert (result.lines_total, result.lines_parsed) == (0, 0)
     assert result.first_timestamp is None
+
+
+# --- dates too wide to believe -----------------------------------------------
+
+def _monthly(day: str, month: str, command: str) -> str:
+    return f"{month} {day} 03:00:01 web01 CRON[1]: (root) CMD ({command})\n"
+
+
+IMPLAUSIBLE = "".join(
+    _monthly("05", month, "/bin/hourly")
+    for month in ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Nov"]
+) + _monthly("05", "Jan", "/bin/hourly")  # an old archive glued on the end
+
+
+def test_a_year_wide_span_over_a_handful_of_lines_is_flagged():
+    """The backstop for a rollover that should not have been taken.
+
+    A genuine ~300-day backwards step is accepted as a new year, so a file
+    built by concatenating an old archive onto a current one can still be
+    dated a year out.  Nothing in the log says so; the tell is a span far
+    wider than that many lines could fill.
+    """
+    result = scan(IMPLAUSIBLE)
+
+    assert len(result.implausible_dates) == 1
+    suspect = result.implausible_dates[0]
+    assert suspect.origin == "fixture"
+    assert suspect.lines == 10
+    assert suspect.span_days == 365
+
+
+def test_a_dense_year_wide_log_is_not_flagged():
+    """A year of syslog that is actually filled in is left alone.
+
+    The span alone is not the complaint - a host really can keep a year of
+    logs.  The complaint is a span with nothing in it, so a file carrying more
+    lines than the span has days passes however wide it is.
+    """
+    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    lines = [
+        f"{month} {day:02d} {hour:02d}:00:01 web01 CRON[1]: (root) CMD (/bin/daily)\n"
+        for month in months
+        for day in range(1, 29)
+        for hour in (3, 15)
+    ]
+    result = scan("".join(lines), reference=datetime(2027, 1, 2, 9, 0))
+
+    assert result.implausible_dates == []
+    assert len(result.cron_runs) == 672
+
+
+def test_an_iso_dated_log_is_never_flagged():
+    """journalctl's ISO formats carry the year, so a wide span is data."""
+    lines = [
+        f"2025-{month:02d}-05 03:00:01 web01 CRON[1]: (root) CMD (/bin/monthly)\n"
+        for month in range(1, 13)
+    ]
+    result = scan("".join(lines))
+
+    assert result.implausible_dates == []
+    assert len(result.cron_runs) == 12
+
+
+def test_a_short_year_less_log_is_not_flagged():
+    assert scan(SYSLOG).implausible_dates == []
