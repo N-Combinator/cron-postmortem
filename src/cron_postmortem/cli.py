@@ -199,6 +199,14 @@ def main(argv: list[str] | None = None) -> int:
     else:
         sys.stdout.write(text)
 
+    if result.usage_error:
+        # Not "your jobs are unhealthy" but "this scan could never have answered
+        # the question", so it outranks --exit-zero: that flag mutes findings for
+        # a monitoring check, it must not mute a broken invocation.
+        for warning in result.warnings:
+            if warning.usage_error:
+                print(f"cron-postmortem: {warning.message}", file=sys.stderr)
+        return EXIT_USAGE
     if result.alerts and not args.exit_zero:
         return EXIT_PROBLEMS
     return EXIT_OK

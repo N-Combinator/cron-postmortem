@@ -9,6 +9,7 @@ monitoring check that only ever reads that code.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 from cron_postmortem import cli
 from cron_postmortem.report import to_json, to_markdown
@@ -234,3 +235,182 @@ def test_the_timezone_warning_names_the_timer_in_the_report(tmp_path):
     text = to_markdown(result)
     assert "`unsupported-timezone`" in text
     assert "Europe/Berlin" in text
+
+
+# --- a window the tolerance eats whole ---------------------------------------
+#
+# An occurrence is judged only once its tolerance has elapsed, so the last
+# moment a scan can rule on is window_end - tolerance.  With a tolerance longer
+# than the window that deadline falls before the window opens: every job expects
+# nothing, no detector has anything to say, and the report used to come back
+# "No problems found", exit 0, for a scan that looked at nothing.
+
+# The first line sits exactly on the window start used below, so the start clamp
+# does not shave a second off the spans these tests assert on.
+BUSY_LOG = (
+    "Sep 18 03:00:00 h CRON[1]: (root) CMD (/bin/collect)\n"
+    "Sep 18 03:10:01 h CRON[2]: (root) CMD (/bin/collect)\n"
+    "Sep 18 03:20:01 h CRON[3]: (root) CMD (/bin/collect)\n"
+)
+
+
+def busy_scan(tmp_path, **kwargs) -> tuple:
+    crontab = tmp_path / "root"
+    crontab.write_text("*/10 * * * * /bin/collect\n")
+    log = tmp_path / "syslog"
+    log.write_text(BUSY_LOG)
+    return crontab, log
+
+
+def test_a_window_shorter_than_the_tolerance_is_a_usage_error(tmp_path):
+    crontab, log = busy_scan(tmp_path)
+
+    result = scan(ScanOptions(
+        crontab_paths=[crontab], log_paths=[log], now=NOW,
+        since=datetime(2026, 9, 18, 3, 0, 0),
+        until=datetime(2026, 9, 18, 3, 5, 0),
+        tolerance=3600,
+    ))
+
+    assert codes(result) == ["empty-window"]
+    assert result.problems == 0
+    assert result.usage_error is True
+    assert result.alerts is True
+    assert "300s long but the tolerance is 3600s" in result.warnings[0].message
+
+
+def test_an_until_before_the_since_is_a_usage_error(tmp_path):
+    crontab, log = busy_scan(tmp_path)
+
+    result = scan(ScanOptions(
+        crontab_paths=[crontab], log_paths=[log], now=NOW,
+        since=datetime(2026, 9, 18, 4, 0, 0),
+        until=datetime(2026, 9, 18, 3, 0, 0),
+    ))
+
+    assert codes(result) == ["empty-window"]
+    assert result.usage_error is True
+
+
+def test_a_window_exactly_as_long_as_the_tolerance_is_still_scanned(tmp_path):
+    crontab, log = busy_scan(tmp_path)
+
+    result = scan(ScanOptions(
+        crontab_paths=[crontab], log_paths=[log], now=NOW,
+        since=datetime(2026, 9, 18, 3, 0, 0),
+        until=datetime(2026, 9, 18, 3, 10, 0),
+        tolerance=600,
+    ))
+
+    # The deadline lands exactly on the window start: one judgeable instant, and
+    # the 03:00 occurrence is answered by the 03:00:01 run.
+    assert codes(result) == []
+    assert result.job_reports[0].expected == 1
+    assert result.problems == 0
+
+
+def test_the_empty_window_is_reported_instead_of_no_problems_found(tmp_path):
+    crontab, log = busy_scan(tmp_path)
+    result = scan(ScanOptions(
+        crontab_paths=[crontab], log_paths=[log], now=NOW,
+        since=datetime(2026, 9, 18, 3, 0, 0),
+        until=datetime(2026, 9, 18, 3, 5, 0),
+        tolerance=3600,
+    ))
+
+    text = to_markdown(result)
+    assert "## Warnings (1)" in text
+    assert "`empty-window`" in text
+    assert "No problems found." not in text
+
+    warning = json.loads(to_json(result))["warnings"][0]
+    assert (warning["code"], warning["usage_error"]) == ("empty-window", True)
+
+
+def test_the_cli_exits_two_on_an_empty_window(tmp_path, capsys):
+    crontab, log = busy_scan(tmp_path)
+
+    code = cli.main([
+        "scan", "--crontab", str(crontab), "--log-file", str(log), "--now", NOW_ARG,
+        "--since", "2026-09-18T03:00:00", "--until", "2026-09-18T03:05:00",
+        "--tolerance", "3600",
+    ])
+
+    captured = capsys.readouterr()
+    assert code == cli.EXIT_USAGE
+    assert "`empty-window`" in captured.out
+    assert "cron-postmortem: the window" in captured.err
+
+
+def test_exit_zero_does_not_silence_a_usage_error(tmp_path, capsys):
+    crontab, log = busy_scan(tmp_path)
+
+    code = cli.main([
+        "scan", "--crontab", str(crontab), "--log-file", str(log), "--now", NOW_ARG,
+        "--since", "2026-09-18T03:00:00", "--until", "2026-09-18T03:05:00",
+        "--tolerance", "3600", "--exit-zero",
+    ])
+
+    capsys.readouterr()
+    # --exit-zero mutes findings for a monitoring check; it must not mute the
+    # news that the scan never ran.
+    assert code == cli.EXIT_USAGE
+
+
+def test_a_log_too_short_for_the_tolerance_is_caught_by_the_clamp(tmp_path):
+    """No --since/--until: the window collapses onto a one-line log."""
+    crontab = tmp_path / "root"
+    crontab.write_text("0 3 * * * /bin/true\n")
+    log = tmp_path / "syslog"
+    log.write_text("Sep 18 03:00:01 h CRON[2]: (root) CMD (/bin/true)\n")
+
+    result = scan(ScanOptions(crontab_paths=[crontab], log_paths=[log], now=NOW))
+
+    assert codes(result) == ["empty-window"]
+    assert result.usage_error is True
+
+
+TIMER_SLACK_SHOW = """\
+Id=slow.timer
+Description=Slow timer
+LoadState=loaded
+ActiveState=active
+SubState=waiting
+Unit=slow.service
+AccuracyUSec=1h
+RandomizedDelayUSec=0
+TimersCalendar={ OnCalendar=*-*-* 03:00:00 ; next_elapse=n/a }
+
+Id=slow.service
+Description=Slow job
+LoadState=loaded
+ActiveState=inactive
+SubState=dead
+Result=success
+ExecMainStatus=0
+Type=oneshot
+"""
+
+
+def test_a_timer_whose_slack_outlasts_the_window_warns_without_a_usage_error(tmp_path):
+    """The window is fine in general - AccuracySec is what empties it here."""
+    show = tmp_path / "show.txt"
+    show.write_text(TIMER_SLACK_SHOW)
+    log = tmp_path / "journal.log"
+    log.write_text(
+        "2026-09-18T03:00:01+0200 h systemd[1]: Starting slow.service - Slow job...\n"
+        "2026-09-18T03:00:09+0200 h systemd[1]: slow.service: Deactivated successfully.\n"
+    )
+
+    result = scan(ScanOptions(
+        show_paths=[show], log_paths=[log], now=NOW,
+        since=datetime(2026, 9, 18, 2, 55, 0),
+        until=datetime(2026, 9, 18, 3, 5, 0),
+    ))
+
+    assert codes(result) == ["empty-window"]
+    # The caller's arguments are not at fault, so this one exits 1, not 2.
+    assert result.usage_error is False
+    assert result.alerts is True
+    assert "systemd:slow.timer" in result.warnings[0].message
+    assert "3720s" in result.warnings[0].message

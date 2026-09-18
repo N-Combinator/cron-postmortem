@@ -72,6 +72,16 @@ class ScanResult:
         return len(self.findings)
 
     @property
+    def usage_error(self) -> bool:
+        """Whether the scan was asked for something it could never answer.
+
+        Separate from :attr:`alerts` because the answer is not "your jobs are
+        unhealthy" but "these arguments contradict each other"; the CLI turns it
+        into exit code 2 and ``--exit-zero`` does not silence it.
+        """
+        return any(warning.usage_error for warning in self.warnings)
+
+    @property
     def alerts(self) -> bool:
         """Whether this scan should exit non-zero.
 
@@ -159,6 +169,9 @@ def scan(options: ScanOptions) -> ScanResult:
         )
 
     window_start, window_end = _resolve_window(options, scan_data, diagnostics)
+    empty_window = _empty_window_warning(options, window_start, window_end)
+    if empty_window is not None:
+        warnings.append(empty_window)
 
     cron_runs_by_job = _match_cron_runs(jobs, scan_data, diagnostics)
     events_by_unit: dict[str, list] = {}
@@ -179,6 +192,7 @@ def scan(options: ScanOptions) -> ScanResult:
             timer_state=states_by_id.get(job.timer or ""),
             diagnostics=diagnostics,
             warnings=warnings,
+            report_empty_window=empty_window is None,
         )
         job_reports.append(report)
         findings.extend(report.findings)
@@ -253,6 +267,42 @@ def _no_log_lines_warning(
         f"no log lines parsed: {detail}; check the log format and that cron logs "
         "under one of " + ", ".join(journal_cron_identifiers()),
     )
+
+
+def _empty_window_warning(
+    options: ScanOptions, window_start: datetime, window_end: datetime
+) -> ScanWarning | None:
+    """Refuse a window that the tolerance eats whole.
+
+    An occurrence is only judged once its tolerance has fully elapsed, so the
+    last moment a scan can rule on is ``window_end - tolerance``.  When the
+    tolerance is longer than the window itself that deadline falls before the
+    window even opens: every job gets zero expected runs, every detector has
+    nothing to say and the report reads "No problems found" for a scan that
+    checked nothing at all.  ``--since 10m --tolerance 3600`` and a ``--until``
+    older than ``--since`` both land here, and so does a log so short that the
+    start clamp leaves less than the tolerance.
+
+    That is the caller's arguments contradicting each other rather than a
+    finding about a job, so it is a usage error: exit 2, not a clean 0.
+    """
+    span = (window_end - window_start).total_seconds()
+    if span >= options.tolerance:
+        return None
+    return ScanWarning(
+        "empty-window",
+        f"the window {window_start.isoformat(sep=' ')} - "
+        f"{window_end.isoformat(sep=' ')} is {_seconds(span)} long but the "
+        f"tolerance is {_seconds(options.tolerance)}, so no scheduled run could "
+        "be judged and nothing was checked; widen --since/--until (the window "
+        "may also have been clamped to the log's first entry) or lower "
+        "--tolerance",
+        usage_error=True,
+    )
+
+
+def _seconds(value: float) -> str:
+    return f"{int(value)}s"
 
 
 def _collect_jobs(
@@ -532,6 +582,7 @@ def _analyse_job(
     timer_state: systemd.UnitState | None,
     diagnostics: list[Diagnostic],
     warnings: list[ScanWarning],
+    report_empty_window: bool = True,
 ) -> JobReport:
     tolerance = options.tolerance
     if job.source == SYSTEMD and timer_state is not None:
@@ -546,6 +597,19 @@ def _analyse_job(
     # An occurrence is only judged once its tolerance has fully elapsed inside the
     # window; otherwise the very last scheduled run is always "missed".
     deadline = window_end - timedelta(seconds=tolerance)
+    if deadline < window_start and report_empty_window:
+        # The window is long enough in general but not for this timer: AccuracySec
+        # and RandomizedDelaySec buy it more slack than the window has to give.
+        # Nothing about it is checked, and it must not look checked.
+        warnings.append(
+            ScanWarning(
+                "empty-window",
+                f"{job.id}: the timer's slack of {_seconds(tolerance)} "
+                f"(--tolerance plus AccuracySec/RandomizedDelaySec) is longer than "
+                "the analysed window, so none of its runs could be judged; widen "
+                "--since/--until",
+            )
+        )
     parse = cronspec.parse if job.source == CRON else calendarspec.parse
     moments: set[datetime] = set()
     schedule_ok = True

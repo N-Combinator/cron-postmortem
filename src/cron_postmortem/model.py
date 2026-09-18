@@ -109,13 +109,23 @@ class ScanWarning:
     could not do what it was asked to do - no schedules to check, no log lines
     understood - so reporting success would be a lie.  Warnings therefore move
     the exit code, findings-style, even though they belong to no single job.
+
+    ``usage_error`` marks the subset that is the caller's fault rather than the
+    host's: arguments that contradict each other, such as a window shorter than
+    the tolerance applied to it.  Those exit 2 (usage) instead of 1 (problems
+    found), because there is no report to act on - the scan never ran.
     """
 
     code: str
     message: str
+    usage_error: bool = False
 
     def as_dict(self) -> dict:
-        return {"code": self.code, "message": self.message}
+        return {
+            "code": self.code,
+            "message": self.message,
+            "usage_error": self.usage_error,
+        }
 
 
 @dataclass

@@ -45,9 +45,16 @@ def test_a_clean_scan_exits_zero(tmp_path, capsys):
     log.write_text("Sep 18 03:00:01 h CRON[2]: (root) CMD (/bin/true)\n")
     code = cli.main([
         "scan", "--crontab", str(crontab), "--log-file", str(log), "--now", NOW_ARG,
+        # An explicit window: without one it would end at the log's only line,
+        # leaving nothing far enough from the edge to judge - a clean report
+        # that checked nothing, which is now a usage error rather than a pass.
+        "--since", "2026-09-18T00:00:00", "--until", "2026-09-18T06:00:00",
     ])
+    out = capsys.readouterr().out
     assert code == cli.EXIT_OK
-    assert "No problems found." in capsys.readouterr().out
+    assert "No problems found." in out
+    # One occurrence expected, one run observed: the scan really did check it.
+    assert "| 1 | 1 | 0 |" in out
 
 
 def test_json_output(capsys):
