@@ -2,7 +2,9 @@
 
 Deliberately dependency-free: the whole point of this tool is to be droppable onto a
 box that already has a problem, so it only uses the standard library.  The semantics
-follow Vixie cron, including the day-of-month / day-of-week OR rule.
+follow Vixie cron, including the day-of-month / day-of-week rule: both masks are
+always tested, and the two fields are ANDed when either is written starting with a
+``*`` and ORed otherwise.
 """
 
 from __future__ import annotations
@@ -46,8 +48,8 @@ class CronSchedule:
     days_of_month: frozenset[int]
     months: frozenset[int]
     days_of_week: frozenset[int]
-    dom_restricted: bool
-    dow_restricted: bool
+    dom_star: bool
+    dow_star: bool
 
     def matches_day(self, day: date) -> bool:
         if day.month not in self.months:
@@ -55,13 +57,12 @@ class CronSchedule:
         dom_ok = day.day in self.days_of_month
         # Python: Monday == 0; cron: Sunday == 0.
         dow_ok = ((day.weekday() + 1) % 7) in self.days_of_week
-        if self.dom_restricted and self.dow_restricted:
-            return dom_ok or dow_ok
-        if self.dom_restricted:
-            return dom_ok
-        if self.dow_restricted:
-            return dow_ok
-        return True
+        # Vixie cron always tests both day masks; the star flags only pick the
+        # operator.  ``*/2`` starts with a star, so it is an AND - which is what
+        # makes ``0 3 */2 * *`` fire every other day instead of every day.
+        if self.dom_star or self.dow_star:
+            return dom_ok and dow_ok
+        return dom_ok or dow_ok
 
     def occurrences(self, start: datetime, end: datetime) -> list[datetime]:
         """Every firing time in the closed interval [start, end]."""
@@ -98,13 +99,17 @@ def _parse_value(token: str, low: int, high: int, names: dict[str, int]) -> int:
 def _parse_field(
     field: str, low: int, high: int, names: dict[str, int] | None = None
 ) -> tuple[frozenset[int], bool]:
-    """Return the matching values and whether the field is restricted (not ``*``)."""
+    """Return the matching values and whether the field text starts with ``*``.
+
+    The star flag follows Vixie's ``DOM_STAR``/``DOW_STAR``: it records the literal
+    shape of the field, not how many values it expands to, so ``*/2`` is starred
+    even though it restricts the set.
+    """
     names = names or {}
     field = field.strip()
     if not field:
         raise CronParseError("empty field")
     values: set[int] = set()
-    restricted = False
     for part in field.split(","):
         part = part.strip()
         match = _FIELD_RE.match(part)
@@ -120,18 +125,16 @@ def _parse_field(
             head, _, tail = body.partition("-")
             first = _parse_value(head, low, high, names)
             last = _parse_value(tail, low, high, names)
-            restricted = True
         else:
             first = _parse_value(body, low, high, names)
             # ``5/10`` means "from 5, every 10" - a bare ``5`` is a single value.
             last = high if match.group("step") else first
-            restricted = True
         if last < first:
             raise CronParseError(f"inverted range in {part!r}")
         values.update(range(first, last + 1, step))
     if not values:
         raise CronParseError(f"field {field!r} matches nothing")
-    return frozenset(values), restricted
+    return frozenset(values), field.startswith("*")
 
 
 def parse(expression: str) -> CronSchedule:
@@ -151,9 +154,9 @@ def parse(expression: str) -> CronSchedule:
         raise CronParseError(f"expected 5 fields, got {len(fields)}: {expression!r}")
     minutes, _ = _parse_field(fields[0], 0, 59)
     hours, _ = _parse_field(fields[1], 0, 23)
-    doms, dom_restricted = _parse_field(fields[2], 1, 31)
+    doms, dom_star = _parse_field(fields[2], 1, 31)
     months, _ = _parse_field(fields[3], 1, 12, MONTH_NAMES)
-    raw_dows, dow_restricted = _parse_field(fields[4], 0, 7, DOW_NAMES)
+    raw_dows, dow_star = _parse_field(fields[4], 0, 7, DOW_NAMES)
     dows = frozenset(0 if d == 7 else d for d in raw_dows)
     return CronSchedule(
         minutes=minutes,
@@ -161,6 +164,6 @@ def parse(expression: str) -> CronSchedule:
         days_of_month=doms,
         months=months,
         days_of_week=dows,
-        dom_restricted=dom_restricted,
-        dow_restricted=dow_restricted,
+        dom_star=dom_star,
+        dow_star=dow_star,
     )

@@ -45,7 +45,7 @@ def test_rejects_broken_expressions(expression):
 
 
 def test_day_of_month_and_day_of_week_are_ored():
-    # Vixie cron: when both day fields are restricted, either one matching fires.
+    # Vixie cron: with neither day field written as a star, either one matching fires.
     schedule = cronspec.parse("0 0 13 * fri")
     days = [moment.day for moment in schedule.occurrences(
         datetime(2026, 11, 1), datetime(2026, 11, 30, 23, 59)
@@ -67,3 +67,29 @@ def test_occurrences_are_inclusive_and_empty_when_inverted():
         datetime(2026, 9, 18, 3)
     ]
     assert schedule.occurrences(datetime(2026, 9, 18, 4), datetime(2026, 9, 18, 3)) == []
+
+
+def test_step_in_day_of_month_constrains_the_day():
+    schedule = cronspec.parse("0 3 */2 * *")
+    days = schedule.occurrences(datetime(2026, 9, 1), datetime(2026, 9, 7, 23, 59))
+    assert [moment.day for moment in days] == [1, 3, 5, 7]
+
+
+def test_step_in_day_of_week_constrains_the_day():
+    # `*/2` in DOW is every other weekday number: Sunday, Tuesday, Thursday, Saturday.
+    schedule = cronspec.parse("0 3 * * */2")
+    days = schedule.occurrences(datetime(2026, 9, 14), datetime(2026, 9, 20, 23, 59))
+    assert [moment.date().isoformat() for moment in days] == [
+        "2026-09-15",  # Tuesday
+        "2026-09-17",  # Thursday
+        "2026-09-19",  # Saturday
+        "2026-09-20",  # Sunday
+    ]
+
+
+def test_starred_day_of_month_step_ands_with_day_of_week():
+    # A field starting with `*` picks Vixie's AND branch, so this is
+    # "odd days of the month that are also Fridays", not the OR of the two.
+    schedule = cronspec.parse("0 0 */2 * fri")
+    days = schedule.occurrences(datetime(2026, 9, 1), datetime(2026, 9, 30, 23, 59))
+    assert [moment.day for moment in days] == [11, 25]
