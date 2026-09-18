@@ -1,0 +1,106 @@
+"""Data model shared by the parsers, the detectors and the reporters."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+
+CRON = "cron"
+SYSTEMD = "systemd"
+
+MISSED = "missed"
+OVERLAP = "overlap"
+FAILURE = "failure"
+
+ERROR = "error"
+WARNING = "warning"
+
+
+@dataclass(frozen=True)
+class Job:
+    """A scheduled job we know about, independent of whether it ever ran."""
+
+    id: str
+    source: str
+    schedule: str
+    origin: str
+    user: str | None = None
+    command: str | None = None
+    unit: str | None = None
+    timer: str | None = None
+
+    def as_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "source": self.source,
+            "schedule": self.schedule,
+            "origin": self.origin,
+            "user": self.user,
+            "command": self.command,
+            "unit": self.unit,
+            "timer": self.timer,
+        }
+
+
+@dataclass
+class Run:
+    """One observed execution of a job, as reconstructed from log lines."""
+
+    job_id: str
+    start: datetime
+    end: datetime | None = None
+    pid: int | None = None
+    exit_code: int | None = None
+    result: str | None = None
+
+    @property
+    def duration(self) -> float | None:
+        if self.end is None:
+            return None
+        return (self.end - self.start).total_seconds()
+
+    def as_dict(self) -> dict:
+        return {
+            "start": self.start.isoformat(),
+            "end": self.end.isoformat() if self.end else None,
+            "duration_seconds": self.duration,
+            "pid": self.pid,
+            "exit_code": self.exit_code,
+            "result": self.result,
+        }
+
+
+@dataclass
+class Finding:
+    """A problem worth a non-zero exit code."""
+
+    kind: str
+    severity: str
+    job_id: str
+    source: str
+    message: str
+    when: datetime | None = None
+    details: dict = field(default_factory=dict)
+
+    def as_dict(self) -> dict:
+        return {
+            "kind": self.kind,
+            "severity": self.severity,
+            "job_id": self.job_id,
+            "source": self.source,
+            "message": self.message,
+            "when": self.when.isoformat() if self.when else None,
+            "details": self.details,
+        }
+
+
+@dataclass
+class Diagnostic:
+    """Something we could not analyse; not a job problem, a coverage gap."""
+
+    job_id: str | None
+    message: str
+    origin: str | None = None
+
+    def as_dict(self) -> dict:
+        return {"job_id": self.job_id, "message": self.message, "origin": self.origin}
