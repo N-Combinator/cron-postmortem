@@ -13,6 +13,11 @@ finds something, so it drops straight into a monitoring check.
 - **FAILURE** — a systemd unit run that systemd itself calls a failure: `Result=` other
   than `success`, or `ActiveState=failed`.
 
+It also refuses to report success when it checked nothing. A scan that found no
+schedules, or that understood not one line of the log it was given, prints a
+**warning** and exits non-zero: "no problems" and "nothing was looked at" have to be
+different answers to a monitoring check.
+
 Zero runtime dependencies, Python 3.10+, Linux.
 
 ## Install
@@ -82,9 +87,25 @@ $ journalctl --since "24 hours ago" -o short-iso -u backup-db.service >> cron.lo
 
 | Code | Meaning |
 | ---: | --- |
-| `0` | No problems found (or `--exit-zero`). |
-| `1` | At least one missed run, overlap or failure. |
+| `0` | Nothing wrong and the scan was conclusive (or `--exit-zero`). |
+| `1` | At least one missed run, overlap or failure — or a warning that the scan could not check what it was asked to. |
 | `2` | Usage error: unreadable input, unwritable output. |
+
+### Warnings
+
+A warning means the report is not conclusive. It is listed under `## Warnings` in the
+Markdown report, appears in `warnings` in the JSON, and counts towards exit code 1 —
+`--exit-zero` silences the exit code, not the warning.
+
+| Code | Raised when |
+| --- | --- |
+| `no-schedules` | Not one crontab entry or timer was found, so every detector had nothing to run against. |
+| `no-log-lines` | No log source was given, or nothing in it parsed as a cron/systemd log line — check the format and the syslog identifier. |
+| `unsupported-timezone` | An `OnCalendar=` value names a timezone (see the limitations); that timer is excluded from missed-run detection. |
+
+The summary line `Log lines read N, understood M` (`log_lines_total` /
+`log_lines_parsed` in JSON) is there for the in-between case: a log source that is only
+partly understood still scans, and those two numbers are how you notice.
 
 ## Example output
 
@@ -106,6 +127,8 @@ Window `2026-09-18 02:50:00` → `2026-09-18 05:59:40` (tolerance 120s), generat
 | Jobs | Runs | Missed | Overlaps | Failures |
 | ---: | ---: | -----: | -------: | -------: |
 | 7 | 17 | 2 | 2 | 1 |
+
+Log lines read 64, understood 62.
 
 ## Failures (1)
 
@@ -153,7 +176,8 @@ Window `2026-09-18 02:50:00` → `2026-09-18 05:59:40` (tolerance 120s), generat
   },
   "summary": {
     "jobs": 7, "runs": 17, "missed": 2, "overlap": 2,
-    "failure": 1, "problems": 5, "diagnostics": 2
+    "failure": 1, "problems": 5, "warnings": 0, "diagnostics": 2,
+    "log_lines_total": 64, "log_lines_parsed": 62
   },
   "jobs": [
     {
@@ -180,6 +204,7 @@ Window `2026-09-18 02:50:00` → `2026-09-18 05:59:40` (tolerance 120s), generat
     }
   ],
   "findings": [ "..." ],
+  "warnings": [ "..." ],
   "diagnostics": [ "..." ]
 }
 ```
@@ -197,8 +222,14 @@ Supported log formats: traditional syslog (`Sep 18 03:00:01 host CRON[1234]: ...
 the journalctl renderings `short-iso`, `short-iso-precise` and `short-full`. Traditional
 syslog carries no year, so it is inferred from `--now` with December→January rollover.
 
+Cron is recognised under the identifiers `cron` and `crond` in either case — Debian logs
+as `CRON`, cronie as `CROND` — and `--journal` asks `journalctl -t` for all four
+spellings, so the live query and the file parser cover exactly the same hosts.
+
 Timestamps are compared as **local wall-clock time**, because that is what cron and
 systemd timers fire against; a UTC offset in a log line is dropped rather than converted.
+For the same reason a schedule that names another timezone is refused rather than
+guessed at — see the limitations below.
 
 If the requested window starts before the log does, the **start** is clamped to the
 log's first entry and a diagnostic says so — otherwise every run from before the log
@@ -233,6 +264,15 @@ not happen in.
 - `OnCalendar=` support covers the shorthands, weekday filters, lists, `a..b` ranges and
   `/step` repetitions. `~` (last-day) expressions and per-second schedules are reported
   as diagnostics rather than silently ignored.
+- **Timezones in schedules are not supported.** An `OnCalendar=` value with a trailing
+  zone (`*-*-* 09:00:00 Europe/Berlin`, `daily UTC`) is refused: every timestamp here is
+  naive local wall-clock time, and converting the schedule would mean routing it through
+  the zone of whichever machine happens to run the scan, which need not be the machine
+  the log came from. That timer is excluded from missed-run detection — overlaps and
+  failures are still reported for it — and the scan raises the `unsupported-timezone`
+  warning and exits non-zero rather than quietly comparing against the wrong hour.
+  Likewise, cronie's `CRON_TZ=` in a crontab is not applied; the entries below it are
+  read as local time and a diagnostic says so.
 - Monotonic timers (`OnBootSec=`, `OnUnitActiveSec=`) have no calendar, so they cannot be
   checked for missed runs.
 - A timer with several `OnCalendar=` lines is one job: systemd ORs them, so the expected
