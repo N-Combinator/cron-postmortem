@@ -33,11 +33,17 @@ the seconds they shared, from logs that were already on disk.
 - **Author:** Brilliant_Length_765
 - **Quote:** "Bash scripts + cron jobs - worked until they didn't, found out 3 months later"
 
-**What cron-postmortem does about it:** the window's end is never clamped to the
-last log line, so silence *is* the finding. One scan of the existing syslog names
-the first occurrence that never ran — the day the job actually stopped — and
-every one since, while the other jobs in the same crontab come back clean, which
-is what separates "this job died" from "cron died".
+**What cron-postmortem does about it:** an occurrence the schedule promised with
+no run against it in the log is reported as missed, so a job that quietly stopped
+comes back as every occurrence since. The window's start is clamped to the log's
+first entry — runs from before the log begins are unknowable, not missed — and
+with no `--until` the end defaults to the log's last entry, so one scan of the
+syslog already on disk names the first occurrence that never ran (the day the job
+actually stopped) and every one after it, while the other jobs in the same
+crontab come back clean: that contrast is what separates "this job died" from
+"cron died". The end is *not* clamped to the log, so `--until now` checks the
+silent tail past the last log line as well and counts the occurrences in it as
+missed too.
 
 ## 3. "i need to manually create each cron job to check everything"
 
