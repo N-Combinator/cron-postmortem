@@ -166,3 +166,28 @@ def test_scan_records_the_covered_window(fixtures):
     assert result.first_timestamp == datetime(2026, 9, 18, 2, 50, 0)
     assert result.last_timestamp == datetime(2026, 9, 18, 5, 33, 10)
     assert result.lines_total == 34
+
+
+def test_every_journal_identifier_is_one_the_parser_accepts():
+    # The live journal query and the parser must name the same daemons: asking
+    # journalctl for fewer spellings than the parser understands makes a whole
+    # family of hosts (cronie logs as CROND) report no cron runs at all.
+    identifiers = logs.journal_cron_identifiers()
+    assert {name.lower() for name in identifiers} == logs.CRON_IDENTS
+    # journalctl -t matches the recorded spelling, so both cases are asked for.
+    for name in logs.CRON_IDENTS:
+        assert name in identifiers and name.upper() in identifiers
+
+
+def test_a_crond_line_is_parsed_like_a_cron_one():
+    result = scan(
+        "Sep 18 03:00:01 rhel01 CROND[7]: pam_unix(crond:session): "
+        "session opened for user root by (uid=0)\n"
+        "Sep 18 03:00:01 rhel01 CROND[8]: (root) CMD (/usr/local/bin/backup.sh)\n"
+        "Sep 18 03:04:00 rhel01 CROND[7]: pam_unix(crond:session): "
+        "session closed for user root\n"
+    )
+    assert len(result.cron_runs) == 1
+    run = result.cron_runs[0]
+    assert run.command == "/usr/local/bin/backup.sh"
+    assert run.end == datetime(2026, 9, 18, 3, 4)

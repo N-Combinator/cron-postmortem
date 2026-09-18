@@ -118,7 +118,9 @@ def test_the_window_is_passed_through_to_journalctl(host, etc):
     for call in (cron_call, unit_call):
         assert call[call.index("--since") + 1] == "2026-09-18 02:00:00"
         assert call[call.index("--until") + 1] == "2026-09-18 06:00:00"
-    assert cron_call[-6:] == ["-t", "CRON", "-t", "cron", "-t", "crond"]
+    assert cron_call[-8:] == [
+        "-t", "cron", "-t", "CRON", "-t", "crond", "-t", "CROND",
+    ]
     # One -u matcher per discovered unit, the timers' services.
     assert unit_call.count("-u") == 4
     assert "backup-db.service" in unit_call

@@ -21,6 +21,22 @@ CRON_IDENTS = {"cron", "crond"}
 SYSTEMD_IDENTS = {"systemd"}
 KNOWN_IDENTS = CRON_IDENTS | SYSTEMD_IDENTS
 
+
+def journal_cron_identifiers() -> list[str]:
+    """``journalctl -t`` values covering every identifier this parser accepts.
+
+    The parser lower-cases the identifier before comparing, but ``journalctl -t``
+    matches the recorded spelling exactly, so each name has to be asked for both
+    ways: Debian's cron logs as ``CRON``, cronie as ``CROND``, and some builds
+    use lower case.  Asking for fewer spellings than the parser understands
+    means a whole family of hosts silently reports no cron runs at all.
+    """
+    identifiers: list[str] = []
+    for ident in sorted(CRON_IDENTS):
+        identifiers.extend([ident, ident.upper()])
+    return identifiers
+
+
 MONTHS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
     "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,

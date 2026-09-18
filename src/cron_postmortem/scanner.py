@@ -9,7 +9,7 @@ from pathlib import Path
 from . import __version__, calendarspec, cronspec, systemd
 from . import crontab as crontab_mod
 from .detect import build_unit_runs, detect_failures, detect_missed, detect_overlaps
-from .logs import LogScan, scan_lines
+from .logs import LogScan, journal_cron_identifiers, scan_lines
 from .model import CRON, FAILURE, MISSED, OVERLAP, SYSTEMD, Diagnostic, Finding, Job, Run
 
 DEFAULT_WINDOW = timedelta(hours=24)
@@ -257,9 +257,12 @@ def _collect_logs(
     if options.use_journal:
         since = options.since or options.now - DEFAULT_WINDOW
         until = options.until or options.now
-        text, problems = systemd.live_journal(
-            ["-t", "CRON", "-t", "cron", "-t", "crond"], since, until
-        )
+        matchers = [
+            argument
+            for identifier in journal_cron_identifiers()
+            for argument in ("-t", identifier)
+        ]
+        text, problems = systemd.live_journal(matchers, since, until)
         chunks.append(text)
         diagnostics.extend(Diagnostic(None, problem) for problem in problems)
         units = sorted({job.unit for job in jobs if job.source == SYSTEMD and job.unit})
