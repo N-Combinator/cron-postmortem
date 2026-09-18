@@ -102,6 +102,23 @@ class Finding:
 
 
 @dataclass
+class ScanWarning:
+    """Something wrong with the scan itself rather than with a job.
+
+    A :class:`Diagnostic` is a gap we can live with; a warning means the scan
+    could not do what it was asked to do - no schedules to check, no log lines
+    understood - so reporting success would be a lie.  Warnings therefore move
+    the exit code, findings-style, even though they belong to no single job.
+    """
+
+    code: str
+    message: str
+
+    def as_dict(self) -> dict:
+        return {"code": self.code, "message": self.message}
+
+
+@dataclass
 class Diagnostic:
     """Something we could not analyse; not a job problem, a coverage gap."""
 

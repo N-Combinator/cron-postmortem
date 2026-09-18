@@ -199,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         sys.stdout.write(text)
 
-    if result.problems and not args.exit_zero:
+    if result.alerts and not args.exit_zero:
         return EXIT_PROBLEMS
     return EXIT_OK
 

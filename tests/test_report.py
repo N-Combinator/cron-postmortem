@@ -21,7 +21,8 @@ def test_json_is_valid_and_carries_the_summary():
     payload = json.loads(to_json(result))
     assert payload["summary"] == {
         "jobs": 4, "runs": 8, "missed": 1, "overlap": 1, "failure": 1,
-        "problems": 3, "diagnostics": 1,
+        "problems": 3, "warnings": 0, "diagnostics": 1,
+        "log_lines_total": 29, "log_lines_parsed": 28,
     }
     assert payload["window"]["tolerance_seconds"] == 120.0
 

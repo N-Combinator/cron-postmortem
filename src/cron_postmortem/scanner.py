@@ -10,7 +10,18 @@ from . import __version__, calendarspec, cronspec, systemd
 from . import crontab as crontab_mod
 from .detect import build_unit_runs, detect_failures, detect_missed, detect_overlaps
 from .logs import LogScan, journal_cron_identifiers, scan_lines
-from .model import CRON, FAILURE, MISSED, OVERLAP, SYSTEMD, Diagnostic, Finding, Job, Run
+from .model import (
+    CRON,
+    FAILURE,
+    MISSED,
+    OVERLAP,
+    SYSTEMD,
+    Diagnostic,
+    Finding,
+    Job,
+    Run,
+    ScanWarning,
+)
 
 DEFAULT_WINDOW = timedelta(hours=24)
 DEFAULT_TOLERANCE = 120.0
@@ -52,10 +63,23 @@ class ScanResult:
     findings: list[Finding]
     diagnostics: list[Diagnostic]
     sources: dict[str, list[str]]
+    warnings: list[ScanWarning] = field(default_factory=list)
+    lines_total: int = 0
+    lines_parsed: int = 0
 
     @property
     def problems(self) -> int:
         return len(self.findings)
+
+    @property
+    def alerts(self) -> bool:
+        """Whether this scan should exit non-zero.
+
+        Warnings count: a scan that understood no schedules, or no log lines,
+        found no problems only because it looked at nothing, and a monitoring
+        check that reads that as success is worse than useless.
+        """
+        return bool(self.findings or self.warnings)
 
     def counts(self) -> dict[str, int]:
         counts = {MISSED: 0, OVERLAP: 0, FAILURE: 0}
@@ -81,7 +105,10 @@ class ScanResult:
                 "overlap": counts[OVERLAP],
                 "failure": counts[FAILURE],
                 "problems": self.problems,
+                "warnings": len(self.warnings),
                 "diagnostics": len(self.diagnostics),
+                "log_lines_total": self.lines_total,
+                "log_lines_parsed": self.lines_parsed,
             },
             "sources": self.sources,
             "jobs": [
@@ -95,15 +122,19 @@ class ScanResult:
                 for report in self.job_reports
             ],
             "findings": [finding.as_dict() for finding in self.findings],
+            "warnings": [warning.as_dict() for warning in self.warnings],
             "diagnostics": [diag.as_dict() for diag in self.diagnostics],
         }
 
 
 def scan(options: ScanOptions) -> ScanResult:
     diagnostics: list[Diagnostic] = []
+    warnings: list[ScanWarning] = []
     sources: dict[str, list[str]] = {"crontabs": [], "systemctl_show": [], "logs": []}
 
     jobs, unit_states = _collect_jobs(options, diagnostics, sources)
+    if not jobs:
+        warnings.append(_no_schedules_warning(options, sources))
     states_by_id = {state.unit: state for state in unit_states}
     descriptions = systemd.description_map(unit_states)
 
@@ -115,6 +146,8 @@ def scan(options: ScanOptions) -> ScanResult:
         reference=options.now,
         description_to_unit=descriptions,
     )
+    if scan_data.lines_parsed == 0:
+        warnings.append(_no_log_lines_warning(options, scan_data, log_origins))
     for message in sorted(scan_data.unresolved_systemd_messages):
         diagnostics.append(
             Diagnostic(
@@ -160,6 +193,65 @@ def scan(options: ScanOptions) -> ScanResult:
         findings=findings,
         diagnostics=diagnostics,
         sources=sources,
+        warnings=warnings,
+        lines_total=scan_data.lines_total,
+        lines_parsed=scan_data.lines_parsed,
+    )
+
+
+def _no_schedules_warning(
+    options: ScanOptions, sources: dict[str, list[str]]
+) -> ScanWarning:
+    """A scan with nothing to check must not pass for a healthy one.
+
+    Every detector is driven by the schedules, so with none of them a report of
+    "no problems" says only that nothing was looked at - a typo in ``--crontab``,
+    a crontab directory the scan could not read, or a host with no timers at all
+    all land here.
+    """
+    looked_at = [*sources["crontabs"], *sources["systemctl_show"]]
+    where = ", ".join(looked_at) if looked_at else "no schedule source"
+    if options.discover and not options.crontab_paths and not options.show_paths:
+        hint = (
+            "this host has no readable crontabs or systemd timers; run as root "
+            "if the spool directory is unreadable, or pass --crontab/--systemctl-show"
+        )
+    else:
+        hint = "check the paths passed to --crontab/--systemctl-show"
+    return ScanWarning(
+        "no-schedules", f"no schedules to check (looked at: {where}); {hint}"
+    )
+
+
+def _no_log_lines_warning(
+    options: ScanOptions, scan_data: LogScan, log_origins: list[str]
+) -> ScanWarning:
+    """Not one log line was understood, so nothing could be observed.
+
+    Without runs every occurrence is missed and every job looks dead, or - with
+    no schedules of its own to compare against - the report comes out clean.
+    Either way the answer is about the log source, not about the jobs.
+    """
+    where = ", ".join(log_origins)
+    if not log_origins:
+        return ScanWarning(
+            "no-log-lines",
+            "no log source: pass --log-file or --journal, otherwise no run can "
+            "be observed and every scheduled run counts as missed",
+        )
+    if scan_data.lines_total == 0:
+        detail = f"{where} produced no output"
+        if options.use_journal:
+            detail += " for this window"
+    else:
+        detail = (
+            f"none of the {scan_data.lines_total} line(s) from {where} were "
+            "recognised as cron or systemd log lines"
+        )
+    return ScanWarning(
+        "no-log-lines",
+        f"no log lines parsed: {detail}; check the log format and that cron logs "
+        "under one of " + ", ".join(journal_cron_identifiers()),
     )
 
 

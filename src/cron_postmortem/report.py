@@ -71,9 +71,23 @@ def to_markdown(result: ScanResult) -> str:
         f"| {counts[MISSED]} | {counts[OVERLAP]} | {counts[FAILURE]} |"
     )
     lines.append("")
+    lines.append(
+        f"Log lines read {result.lines_total}, understood {result.lines_parsed}."
+    )
+    lines.append("")
 
-    if not result.findings:
+    if result.warnings:
+        lines.append(f"## Warnings ({len(result.warnings)})")
+        lines.append("")
+        for warning in result.warnings:
+            lines.append(f"- {_code(warning.code)} — {warning.message}")
+        lines.append("")
+
+    if not result.findings and not result.warnings:
         lines.append("No problems found.")
+        lines.append("")
+    elif not result.findings:
+        lines.append("No job problems found, but the scan is not conclusive.")
         lines.append("")
     else:
         for kind in (FAILURE, MISSED, OVERLAP):
