@@ -1,0 +1,29 @@
+-- Journal begins at Tue 2026-09-01 00:00:03 CEST, ends at Fri 2026-09-18 06:00:00 CEST. --
+2026-09-18T02:59:00+0200 web01 systemd[1]: Starting systemd-tmpfiles-clean.service - Cleanup of Temporary Directories...
+2026-09-18T02:59:02+0200 web01 systemd[1]: systemd-tmpfiles-clean.service: Deactivated successfully.
+2026-09-18T02:59:02+0200 web01 systemd[1]: Finished systemd-tmpfiles-clean.service - Cleanup of Temporary Directories.
+2026-09-18T03:00:01+0200 web01 systemd[1]: Starting metrics-push.service - Push metrics to collector...
+2026-09-18T03:00:09+0200 web01 systemd[1]: metrics-push.service: Deactivated successfully.
+2026-09-18T03:00:09+0200 web01 systemd[1]: Finished metrics-push.service - Push metrics to collector.
+2026-09-18T03:30:00+0200 web01 systemd[1]: Starting Certbot renewal...
+2026-09-18T03:30:00+0200 web01 systemd[1]: Starting logship.service - Ship logs to archive...
+2026-09-18T03:30:20+0200 web01 systemd[1]: certbot.service: Succeeded.
+2026-09-18T03:30:20+0200 web01 systemd[1]: Finished Certbot renewal.
+2026-09-18T04:00:03+0200 web01 systemd[1]: Starting backup-db.service - Nightly database backup...
+2026-09-18T04:00:15+0200 web01 systemd[1]: backup-db.service: Main process exited, code=exited, status=1/FAILURE
+2026-09-18T04:00:15+0200 web01 systemd[1]: backup-db.service: Failed with result 'exit-code'.
+2026-09-18T04:00:15+0200 web01 systemd[1]: Failed to start backup-db.service - Nightly database backup.
+2026-09-18T04:30:02+0200 web01 systemd[1]: Starting logship.service - Ship logs to archive...
+2026-09-18T04:35:10+0200 web01 systemd[1]: logship.service: Deactivated successfully.
+2026-09-18T04:35:10+0200 web01 systemd[1]: Finished logship.service - Ship logs to archive.
+2026-09-18T04:36:44+0200 web01 systemd[1]: logship.service: Deactivated successfully.
+2026-09-18T04:36:44+0200 web01 systemd[1]: Finished logship.service - Ship logs to archive.
+2026-09-18T05:00:02+0200 web01 systemd[1]: Starting metrics-push.service - Push metrics to collector...
+2026-09-18T05:00:11+0200 web01 systemd[1]: metrics-push.service: Deactivated successfully.
+2026-09-18T05:00:11+0200 web01 systemd[1]: Finished metrics-push.service - Push metrics to collector.
+2026-09-18T05:30:01+0200 web01 systemd[1]: Starting logship.service - Ship logs to archive...
+2026-09-18T05:33:12+0200 web01 systemd[1]: logship.service: Deactivated successfully.
+2026-09-18T05:33:12+0200 web01 systemd[1]: Finished logship.service - Ship logs to archive.
+2026-09-18T05:59:30+0200 web01 systemd[1]: Starting certbot.service - Certbot renewal...
+2026-09-18T05:59:40+0200 web01 systemd[1]: certbot.service: Succeeded.
+2026-09-18T05:59:40+0200 web01 systemd[1]: Finished certbot.service - Certbot renewal.

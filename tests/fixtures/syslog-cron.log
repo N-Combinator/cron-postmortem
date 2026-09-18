@@ -1,0 +1,34 @@
+Sep 18 02:50:00 web01 CRON[10000]: pam_unix(cron:session): session opened for user root by (uid=0)
+Sep 18 02:50:01 web01 CRON[10001]: (root) CMD (/usr/local/bin/heartbeat.sh)
+Sep 18 02:50:03 web01 CRON[10000]: pam_unix(cron:session): session closed for user root
+Sep 18 02:52:01 web01 CRON[10004]: pam_unix(cron:session): session opened for user root by (uid=0)
+Sep 18 02:52:01 web01 CRON[10005]: (root) CMD (/usr/lib/php/sessionclean)
+Sep 18 02:52:02 web01 CRON[10004]: pam_unix(cron:session): session closed for user root
+Sep 18 03:00:01 web01 CRON[10010]: pam_unix(cron:session): session opened for user root by (uid=0)
+Sep 18 03:00:01 web01 CRON[10011]: (root) CMD (/usr/local/bin/backup.sh)
+Sep 18 03:00:01 web01 CRON[10012]: pam_unix(cron:session): session opened for user root by (uid=0)
+Sep 18 03:00:01 web01 CRON[10013]: (root) CMD (/usr/local/bin/sync-metrics.sh)
+Sep 18 03:00:02 web01 CRON[10012]: pam_unix(cron:session): session closed for user root
+Sep 18 03:17:01 web01 CRON[10020]: pam_unix(cron:session): session opened for user www-data by (uid=0)
+Sep 18 03:17:01 web01 CRON[10021]: (www-data) CMD (/usr/local/bin/rotate-cache.sh)
+Sep 18 03:17:04 web01 CRON[10020]: pam_unix(cron:session): session closed for user www-data
+Sep 18 03:30:01 web01 CRON[10030]: pam_unix(cron:session): session opened for user root by (uid=0)
+Sep 18 03:30:01 web01 CRON[10031]: (root) CMD (/usr/local/bin/sync-metrics.sh)
+Sep 18 03:30:03 web01 CRON[10030]: pam_unix(cron:session): session closed for user root
+Sep 18 03:41:12 web01 CRON[10010]: pam_unix(cron:session): session closed for user root
+Sep 18 04:17:01 web01 CRON[10040]: pam_unix(cron:session): session opened for user www-data by (uid=0)
+Sep 18 04:17:01 web01 CRON[10041]: (www-data) CMD (/usr/local/bin/rotate-cache.sh)
+Sep 18 04:17:05 web01 CRON[10040]: pam_unix(cron:session): session closed for user www-data
+Sep 18 04:30:01 web01 CRON[10050]: pam_unix(cron:session): session opened for user root by (uid=0)
+Sep 18 04:30:01 web01 CRON[10051]: (root) CMD (/usr/local/bin/sync-metrics.sh)
+Sep 18 04:30:02 web01 CRON[10050]: pam_unix(cron:session): session closed for user root
+Sep 18 05:00:01 web01 CRON[10060]: pam_unix(cron:session): session opened for user root by (uid=0)
+Sep 18 05:00:01 web01 CRON[10061]: (root) CMD (/usr/local/bin/sync-metrics.sh)
+Sep 18 05:00:01 web01 CRON[10061]: (root) CMDOUT (collector unreachable, retrying)
+Sep 18 05:17:01 web01 CRON[10065]: pam_unix(cron:session): session opened for user www-data by (uid=0)
+Sep 18 05:17:01 web01 CRON[10066]: (www-data) CMD (/usr/local/bin/rotate-cache.sh)
+Sep 18 05:17:03 web01 CRON[10065]: pam_unix(cron:session): session closed for user www-data
+Sep 18 05:30:02 web01 CRON[10070]: pam_unix(cron:session): session opened for user root by (uid=0)
+Sep 18 05:30:02 web01 CRON[10071]: (root) CMD (/usr/local/bin/sync-metrics.sh)
+Sep 18 05:32:40 web01 CRON[10060]: pam_unix(cron:session): session closed for user root
+Sep 18 05:33:10 web01 CRON[10070]: pam_unix(cron:session): session closed for user root
