@@ -252,6 +252,15 @@ two together would make the seam look like a rollover and push a whole file a ye
 Runs are reconstructed from the merged, time-ordered stream afterwards, so a job whose
 `pam_unix` session straddles the rotation still gets its end.
 
+A rollover is only read into a backwards step that spans most of a year — the distance
+from December 31st to January 1st. A *small* backwards step is a line written out of
+order, which is ordinary: a central syslog collecting hosts whose clocks differ across
+midnight, a backwards NTP correction, a VM snapshot restore. Reading one of those as a
+new year would date every earlier line twelve months out, and since the window starts at
+the log's first entry, one such line would fill the report with missed runs that never
+happened. Lines that carry their own year (journalctl's ISO formats, and `--journal`)
+are never affected by any of this.
+
 Cron is recognised under the identifiers `cron` and `crond` in either case — Debian logs
 as `CRON`, cronie as `CROND` — and `--journal` asks `journalctl -t` for all four
 spellings, so the live query and the file parser cover exactly the same hosts.

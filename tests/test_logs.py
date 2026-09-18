@@ -71,6 +71,38 @@ def test_syslog_year_rolls_over_at_new_year():
     assert [run.start.year for run in result.cron_runs] == [2026, 2027]
 
 
+def test_one_out_of_order_line_is_not_read_as_a_new_year():
+    """A small backwards step is a line out of order, not a rollover.
+
+    Reading it as one dates every line before it a year out; that line then
+    becomes the scan's first timestamp, the window is clamped to it, and a
+    year of occurrences comes back missed.  Centrally aggregated syslog whose
+    hosts disagree across midnight, a backwards NTP step and a rotation glued
+    together with ``cat`` all produce exactly this.
+    """
+    text = (
+        "Sep 18 01:00:01 web01 CRON[100]: (root) CMD (/bin/hourly)\n"
+        "Sep 17 23:59:59 web01 CRON[105]: (root) CMD (/bin/other)\n"
+        "Sep 18 02:00:01 web01 CRON[110]: (root) CMD (/bin/hourly)\n"
+    )
+    result = scan(text)
+    assert [run.start for run in result.cron_runs] == [
+        datetime(2026, 9, 17, 23, 59, 59),
+        datetime(2026, 9, 18, 1, 0, 1),
+        datetime(2026, 9, 18, 2, 0, 1),
+    ]
+    assert result.first_timestamp == datetime(2026, 9, 17, 23, 59, 59)
+
+
+def test_a_backwards_step_of_a_few_weeks_is_not_a_new_year():
+    text = (
+        "Sep 18 03:00:01 web01 CRON[1]: (root) CMD (/bin/a)\n"
+        "Aug 20 03:00:01 web01 CRON[2]: (root) CMD (/bin/b)\n"
+    )
+    result = scan(text)
+    assert {run.start.year for run in result.cron_runs} == {2026}
+
+
 def test_syslog_year_is_shifted_back_when_it_would_be_in_the_future():
     text = "Dec 31 23:59:01 web01 CRON[1]: (root) CMD (/bin/old)\n"
     result = scan(text, reference=datetime(2026, 9, 18, 12, 0))

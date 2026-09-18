@@ -528,3 +528,34 @@ def test_cron_runs_with_no_crontab_at_all_are_not_the_same_complaint(tmp_path):
 
     assert "no-runs-matched" not in codes(result)
     assert any("matched no known" in diag.message for diag in result.diagnostics)
+
+
+# --- dates the scan does not believe ------------------------------------------
+
+def test_one_out_of_order_line_does_not_invent_a_year_of_missed_runs(tmp_path):
+    """The whole report used to hinge on one line being out of order.
+
+    Reading a small backwards step as a December -> January rollover dated every
+    earlier line a year out, that line became the log's first timestamp, the
+    window was clamped to it and an hourly job came back with 8760 missed runs
+    from a four-line log - with no warning and exit 1.
+    """
+    crontab = tmp_path / "root"
+    crontab.write_text("0 * * * * /bin/hourly\n")
+    log = tmp_path / "syslog"
+    log.write_text(
+        "Sep 18 01:00:01 web01 CRON[100]: (root) CMD (/bin/hourly)\n"
+        "Sep 17 23:59:59 web01 CRON[105]: (root) CMD (/bin/other)\n"
+        "Sep 18 02:00:01 web01 CRON[110]: (root) CMD (/bin/hourly)\n"
+        "Sep 18 03:00:01 web01 CRON[120]: (root) CMD (/bin/hourly)\n"
+    )
+
+    result = scan(ScanOptions(crontab_paths=[crontab], log_paths=[log], now=NOW))
+
+    assert result.window_start == datetime(2026, 9, 17, 23, 59, 59)
+    assert result.window_end == datetime(2026, 9, 18, 3, 0, 1)
+    # Only the 00:00 occurrence, which really has no run in the log.
+    assert [finding.when for finding in result.findings] == [
+        datetime(2026, 9, 18, 0, 0)
+    ]
+    assert codes(result) == []

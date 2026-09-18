@@ -51,6 +51,15 @@ SESSION_PAIR_WINDOW = timedelta(seconds=5)
 # known.  It must be a leap year so that "Feb 29" is representable.
 PLACEHOLDER_YEAR = 1904
 
+# How far back a year-less timestamp has to step before the step is read as a
+# December -> January rollover rather than as a line out of order.  A real
+# rollover jumps from the very end of one year to the very beginning of the
+# next, so it is nearly a whole year backwards; a line written out of order (an
+# aggregated syslog whose hosts disagree across midnight, an NTP correction, a
+# VM snapshot restore) steps back by seconds or hours.  Reading the small step
+# as a rollover dates every line before it a year out.
+ROLLOVER_MIN_STEP = timedelta(days=300)
+
 _SYSLOG_TS = re.compile(
     r"^(?P<mon>[A-Za-z]{3})\s+(?P<day>\d{1,2})\s+"
     r"(?P<hour>\d{1,2}):(?P<minute>\d{2}):(?P<second>\d{2})\s+"
@@ -203,9 +212,13 @@ def parse_lines(
 
     Traditional syslog carries no year.  Lines are assumed to be in chronological
     order: the year starts at ``reference``'s year and rolls forward on a
-    backwards jump (December -> January); if that puts entries in the future the
-    whole file is shifted back a year.  A ``Feb 29`` line landing on a non-leap
-    year is pulled back to the 28th by :func:`_with_year`.
+    backwards jump big enough to be a December -> January rollover
+    (``ROLLOVER_MIN_STEP``); if that puts entries in the future the whole file is
+    shifted back a year.  A ``Feb 29`` line landing on a non-leap year is pulled
+    back to the 28th by :func:`_with_year`.
+
+    A smaller backwards step is a line out of order, not a new year, and keeps
+    the year it had.  See :func:`_wrapped`.
     """
     reference = reference or datetime.now()
     out: list[LogLine] = []
@@ -256,8 +269,19 @@ def parse_lines(
 
 
 def _wrapped(candidate: datetime, previous: datetime) -> bool:
-    """True when ``candidate`` looks like it wrapped into the next year."""
-    return (candidate.month, candidate.day) < (previous.month, previous.day)
+    """True when ``candidate`` looks like it wrapped into the next year.
+
+    Both stamps still carry ``PLACEHOLDER_YEAR``, so the difference between them
+    is the distance within one year.  A December -> January rollover is close to
+    a whole year backwards; anything shorter is a line out of order and must not
+    be read as a new year, because doing so dates every line before it a year
+    out.  One such line is enough to drag the scan's first timestamp - and with
+    it the window - back twelve months and fill the report with missed runs that
+    never were.  Out-of-order lines are ordinary: a centrally aggregated syslog
+    whose hosts' clocks differ across midnight, a backwards NTP correction, a VM
+    snapshot restore, or a rotation glued together with ``cat``.
+    """
+    return previous - candidate >= ROLLOVER_MIN_STEP
 
 
 def _with_year(stamp: datetime, year: int) -> datetime:
