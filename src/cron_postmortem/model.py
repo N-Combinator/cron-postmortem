@@ -15,6 +15,10 @@ FAILURE = "failure"
 ERROR = "error"
 WARNING = "warning"
 
+# The one ScanWarning code the exit scheme treats specially; see ScanWarning
+# and cli.EXIT_NO_MATCH.
+NO_RUNS_MATCHED = "no-runs-matched"
+
 
 @dataclass(frozen=True)
 class Job:
@@ -114,6 +118,12 @@ class ScanWarning:
     host's: arguments that contradict each other, such as a window shorter than
     the tolerance applied to it.  Those exit 2 (usage) instead of 1 (problems
     found), because there is no report to act on - the scan never ran.
+
+    :data:`NO_RUNS_MATCHED` gets an exit code of its own (3) for the same
+    reason in reverse: the scan did run, and produced a full page of missed
+    runs that are not real.  A monitoring check that cannot tell that page from
+    a genuine outage acts on fiction, so it must be able to tell them apart
+    from the exit code alone.
     """
 
     code: str

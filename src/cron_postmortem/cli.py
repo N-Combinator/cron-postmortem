@@ -16,6 +16,10 @@ from .scanner import DEFAULT_TOLERANCE, ScanOptions, scan
 EXIT_OK = 0
 EXIT_PROBLEMS = 1
 EXIT_USAGE = 2
+# Not one observed run could be attributed to a scheduled job: the report is
+# full of missed runs that are artefacts of the comparison rather than an
+# outage, so it must not come back as the same 1 a real outage does.
+EXIT_NO_MATCH = 3
 
 KINDS = (MISSED, OVERLAP, FAILURE)
 
@@ -77,7 +81,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sources.add_argument(
         "--crontab-format", choices=("auto", "user", "system"), default="auto",
-        help="whether crontab files carry a user column (default: auto, from the path)",
+        help="whether crontab files carry a user column "
+             "(default: auto, detected from the file's contents)",
     )
     sources.add_argument(
         "--crontab-user", metavar="USER", default=None,
@@ -134,7 +139,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     output.add_argument(
         "--exit-zero", action="store_true",
-        help="always exit 0, even when problems are found",
+        help="always exit 0 when problems are found (does not silence exit 2 or 3, "
+             "which say the report is not a verdict on the jobs)",
     )
     return parser
 
@@ -199,14 +205,23 @@ def main(argv: list[str] | None = None) -> int:
     else:
         sys.stdout.write(text)
 
+    # The report itself goes to stdout or to --output; a warning says the report
+    # is not conclusive, which is exactly what gets lost when stdout is piped
+    # into a file or a dashboard, so every warning is repeated on stderr.
+    for warning in result.warnings:
+        print(f"cron-postmortem: {warning.code}: {warning.message}", file=sys.stderr)
+
     if result.usage_error:
         # Not "your jobs are unhealthy" but "this scan could never have answered
         # the question", so it outranks --exit-zero: that flag mutes findings for
         # a monitoring check, it must not mute a broken invocation.
-        for warning in result.warnings:
-            if warning.usage_error:
-                print(f"cron-postmortem: {warning.message}", file=sys.stderr)
         return EXIT_USAGE
+    if result.no_runs_matched:
+        # Also outranks --exit-zero, and for the same reason: the flag exists so
+        # a monitoring check does not page on findings, and these findings are
+        # not real.  Swallowing this one is how a misread crontab passes for a
+        # clean bill of health - or for an outage that never happened.
+        return EXIT_NO_MATCH
     if result.alerts and not args.exit_zero:
         return EXIT_PROBLEMS
     return EXIT_OK

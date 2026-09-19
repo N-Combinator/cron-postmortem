@@ -19,6 +19,7 @@ from .model import (
     CRON,
     FAILURE,
     MISSED,
+    NO_RUNS_MATCHED,
     OVERLAP,
     SYSTEMD,
     Diagnostic,
@@ -85,6 +86,16 @@ class ScanResult:
         into exit code 2 and ``--exit-zero`` does not silence it.
         """
         return any(warning.usage_error for warning in self.warnings)
+
+    @property
+    def no_runs_matched(self) -> bool:
+        """Whether the schedules and the log could not be reconciled at all.
+
+        The missed runs in such a report are an artefact of the comparison, not
+        an outage, so the CLI gives it an exit code of its own (3) and does not
+        let ``--exit-zero`` mute it.
+        """
+        return any(warning.code == NO_RUNS_MATCHED for warning in self.warnings)
 
     @property
     def alerts(self) -> bool:
@@ -590,11 +601,13 @@ def _nothing_matched_warning(
     else:
         cause = (
             f"the users match ({_names(known_users)}) but none of the commands "
-            "do; check that the crontab and the log come from the same host and "
-            "the same point in time"
+            "do; check that the crontab was read in the right format (a system "
+            "crontab read as a user one puts the user column in front of every "
+            "command - pass --crontab-format) and that the crontab and the log "
+            "come from the same host and the same point in time"
         )
     return ScanWarning(
-        "no-runs-matched",
+        NO_RUNS_MATCHED,
         f"not one cron run in the log could be attributed to a crontab entry, "
         f"so every scheduled cron run counts as missed: {cause}. {summary}",
     )

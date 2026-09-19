@@ -339,7 +339,7 @@ def test_the_cli_exits_two_on_an_empty_window(tmp_path, capsys):
     captured = capsys.readouterr()
     assert code == cli.EXIT_USAGE
     assert "`empty-window`" in captured.out
-    assert "cron-postmortem: the window" in captured.err
+    assert "cron-postmortem: empty-window: the window" in captured.err
 
 
 def test_exit_zero_does_not_silence_a_usage_error(tmp_path, capsys):
@@ -528,6 +528,105 @@ def test_cron_runs_with_no_crontab_at_all_are_not_the_same_complaint(tmp_path):
 
     assert "no-runs-matched" not in codes(result)
     assert any("matched no known" in diag.message for diag in result.diagnostics)
+
+
+# --- a scan that matched nothing has an exit code of its own --------------------
+
+# The crontab from the fixture that started this: a system crontab, collected
+# off a host and saved under the host's name.  Read as a per-user crontab, each
+# command becomes "root /usr/local/bin/..." - a string no log line can say.
+SYSTEM_CAPTURE = """\
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin
+
+*/1 * * * * root /usr/local/bin/poll.sh
+"""
+
+
+def _system_capture(tmp_path, name: str = "web01.crontab") -> tuple:
+    crontab = tmp_path / name
+    crontab.write_text(SYSTEM_CAPTURE)
+    log = tmp_path / "syslog"
+    log.write_text(_busy_log("root"))
+    return crontab, log
+
+
+def _scan_argv(crontab, log, *extra: str) -> list[str]:
+    return [
+        "scan", "--crontab", str(crontab), "--log-file", str(log),
+        "--now", NOW_ARG,
+        "--since", "2026-09-18T03:00:00", "--until", "2026-09-18T04:00:00",
+        *extra,
+    ]
+
+
+def test_the_cli_exits_three_when_not_one_run_matched(tmp_path, capsys):
+    """Acceptance criterion 2: loud, and not the exit code an outage uses.
+
+    ``--crontab-format user`` forces the misreading the old path-based
+    detection made on its own, so the report is the full hour of invented
+    missed runs.  A monitoring check must be able to tell that page from a real
+    one without parsing the report.
+    """
+    crontab, log = _system_capture(tmp_path)
+
+    code = cli.main(_scan_argv(crontab, log, "--crontab-format", "user", "--format", "json"))
+
+    captured = capsys.readouterr()
+    assert code == cli.EXIT_NO_MATCH
+    assert code != cli.EXIT_PROBLEMS
+    assert "cron-postmortem: no-runs-matched:" in captured.err
+
+    report = json.loads(captured.out)
+    assert [warning["code"] for warning in report["warnings"]] == ["no-runs-matched"]
+    assert report["warnings"][0]["usage_error"] is False
+    # The findings it exits on are exactly the ones it is disowning.
+    assert report["summary"]["missed"] > 0
+
+
+def test_the_warning_reaches_the_markdown_report_too(tmp_path, capsys):
+    crontab, log = _system_capture(tmp_path)
+
+    code = cli.main(_scan_argv(crontab, log, "--crontab-format", "user"))
+
+    captured = capsys.readouterr()
+    assert code == cli.EXIT_NO_MATCH
+    assert "## Warnings (1)" in captured.out
+    assert "`no-runs-matched`" in captured.out
+
+
+def test_exit_zero_does_not_silence_a_scan_that_matched_nothing(tmp_path, capsys):
+    """Same reasoning as the usage error: the flag mutes findings, not fiction."""
+    crontab, log = _system_capture(tmp_path)
+
+    code = cli.main(_scan_argv(crontab, log, "--crontab-format", "user", "--exit-zero"))
+
+    capsys.readouterr()
+    assert code == cli.EXIT_NO_MATCH
+
+
+def test_the_misdetected_system_crontab_now_scans_clean(tmp_path, capsys):
+    """Acceptance criterion 3's regression: the fixture that started the issue.
+
+    ``web01.crontab`` is not ``/etc/crontab`` and is not under ``/etc/cron.d``,
+    so v0.1 read a system crontab as a per-user one, matched none of its 60
+    runs and reported every one of them missed - exit 1, indistinguishable from
+    a job that really had stopped.  Detecting the format from the content, the
+    same file under the same name matches all 60 and finds nothing wrong.
+    """
+    crontab, log = _system_capture(tmp_path)
+
+    code = cli.main(_scan_argv(crontab, log, "--format", "json"))
+
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert code == cli.EXIT_OK
+    assert captured.err == ""
+    assert report["warnings"] == []
+    assert report["summary"]["missed"] == 0
+    assert [job["user"] for job in report["jobs"]] == ["root"]
+    assert [job["command"] for job in report["jobs"]] == ["/usr/local/bin/poll.sh"]
+    assert report["summary"]["runs"] == 60
 
 
 # --- dates the scan does not believe ------------------------------------------
