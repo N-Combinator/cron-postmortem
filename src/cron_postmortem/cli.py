@@ -86,7 +86,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sources.add_argument(
         "--crontab-user", metavar="USER", default=None,
-        help="user to attribute user-format crontab entries to",
+        help="user to attribute user-format crontab entries to (also says the "
+             "file has no user column, settling a format its contents cannot)",
     )
     sources.add_argument(
         "--systemctl-show", action="append", default=[], metavar="PATH", type=Path,

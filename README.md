@@ -78,7 +78,7 @@ $ journalctl --since "24 hours ago" -o short-iso -u backup-db.service >> cron.lo
 | --- | --- |
 | `--crontab PATH` | Crontab file to analyse (repeatable). Whether it carries a user column is detected from its **contents** (see below); a user-format file is attributed to `root` unless the filename is a bare username. |
 | `--crontab-format {auto,user,system}` | Force whether crontabs carry a user column, overriding the detection. |
-| `--crontab-user USER` | User to attribute user-format entries to, overriding the filename. |
+| `--crontab-user USER` | User to attribute user-format entries to, overriding the filename. Naming a user also says the file has no user column, so it settles a format the contents cannot (see below). |
 | `--systemctl-show PATH` | Captured `systemctl show <units>` output (repeatable). |
 | `--log-file PATH` | syslog or `journalctl` output (repeatable). |
 | `--journal` / `--discover` | Read logs / schedules from this host. |
@@ -285,12 +285,22 @@ about what is inside them. Every entry votes on what sits in field 6 (field 2 af
 `@macro`) and the majority decides the whole file, since cron applies one format per
 file rather than one per line:
 
-- **system** — field 6 is a plausible user name and the word after it opens a command of
-  its own: an absolute path, `[`, or a known command word (`flock`, `run-parts`, …).
-  `root` is taken as a user name outright.
-- **user** — field 6 cannot be a user name, nothing follows it, it is a command no
-  distribution ships as an account (`python3`, `curl`, `logrotate`, …), or the word
+- **system** — field 6 is a stock account (`root`, `www-data`, `postgres`, …), or the
+  word after it can only be the start of a command of its own — `[`, or a known command
+  word such as `flock` or `run-parts`. Nothing runs `backup` with `flock` as its first
+  argument, so there the command starts at field 7.
+- **user** — field 6 cannot be a user name, it carries a script extension (`backup.sh`,
+  `monitor.py`: an account no distribution ships), nothing follows it, it is a command
+  no distribution ships as an account (`python3`, `curl`, `logrotate`, …), or the word
   after it is an option or a shell operator and so belongs to it.
+- **could be either, so it needs corroboration** — a bare plausible name in front of a
+  *path*. `0 3 * * * backup /data` is a system entry running `/data` as `backup` and a
+  per-user entry running `backup` on `/data`, and so is every per-user entry whose
+  command takes a file argument. Such a line decides nothing by itself; it counts only
+  once the rest of the file backs it up — another entry names an account outright, or
+  the very same word sits in field 6 of a second entry, which is what a user column does
+  and what a list of different commands does not. A file read as system format on
+  repetition alone is reported as a parse problem naming the word it believed.
 - **abstain** — neither shape fits. `*/5 * * * * backup archive` is the honest case:
   `backup` is both a stock account and a plausible script name, and nothing in the line
   can tell them apart.
@@ -303,6 +313,14 @@ not unanimous the choice is reported as a parse problem naming the vote
 1 user-format …); pass --crontab-format if that is wrong`), and `--crontab-format
 user|system` settles it by hand. Lines too broken to be an entry in *either* format are
 left out of the tally entirely — they are reported as broken lines, not as ambiguity.
+
+`--crontab-user` is an answer to this question too: *who* runs these entries is only an
+open question in a file that has no user column, so naming a user overrules a system
+reading that rests on repetition alone, and the parse problem says which option decided
+it. Where the entries do name an account the file wins and the report says the
+`--crontab-user` given was not applied, rather than leaving the caller to wonder why the
+name they passed is nowhere in the output. `--crontab-format user|system` settles the
+format outright and stops the detection from running at all.
 
 The filename still decides one thing, and only one: who owns a *user*-format file. That
 is a separate question from the format, and it is answered in the warnings section

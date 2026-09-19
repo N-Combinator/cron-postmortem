@@ -497,6 +497,66 @@ def test_naming_the_user_makes_the_warning_and_the_missed_runs_go_away(tmp_path)
     assert result.problems == 0
 
 
+def test_a_command_with_a_file_argument_is_not_read_as_a_user_column(tmp_path):
+    """A per-user entry whose command takes a path used to become a system one.
+
+    ``backup.sh /data`` read as a user column turns the job into
+    ``(backup.sh) /data``, which the log never says: sixty runs matched nothing
+    and came back as sixty missed ones plus exit 3, for a crontab and a log that
+    agree line for line.
+    """
+    crontab_file = tmp_path / "web01.crontab"
+    crontab_file.write_text("* * * * * backup.sh /data\n")
+    log = tmp_path / "syslog"
+    log.write_text(_busy_log("alice", command="backup.sh /data"))
+
+    result = scan(
+        ScanOptions(
+            crontab_paths=[crontab_file],
+            log_paths=[log],
+            crontab_user="alice",
+            since=datetime(2026, 9, 18, 3, 0, 0),
+            until=datetime(2026, 9, 18, 4, 0, 0),
+            now=NOW,
+        )
+    )
+
+    assert [(report.job.user, report.job.command) for report in result.job_reports] == [
+        ("alice", "backup.sh /data")
+    ]
+    assert len(result.job_reports[0].runs) == 60
+    assert (codes(result), result.problems, result.alerts) == ([], 0, False)
+
+
+def test_the_warning_does_not_ask_for_the_option_that_was_already_passed(tmp_path):
+    """The entries name their own user, so ``--crontab-user`` was never applied.
+
+    Telling an operator to pass the option they passed is how a real warning
+    gets closed as noise; the remedy has to name what overruled them instead.
+    """
+    crontab_file = tmp_path / "web01.crontab"
+    crontab_file.write_text("* * * * * root /usr/local/bin/poll.sh\n")
+    log = tmp_path / "syslog"
+    log.write_text(_busy_log("alice"))
+
+    result = scan(
+        ScanOptions(
+            crontab_paths=[crontab_file],
+            log_paths=[log],
+            crontab_user="alice",
+            since=datetime(2026, 9, 18, 3, 0, 0),
+            until=datetime(2026, 9, 18, 4, 0, 0),
+            now=NOW,
+        )
+    )
+
+    assert codes(result) == ["no-runs-matched"]
+    message = result.warnings[0].message
+    assert "pass --crontab-user" not in message
+    assert "--crontab-format user" in message
+    assert any("was not applied" in diag.message for diag in result.diagnostics)
+
+
 def test_some_runs_matching_stays_a_diagnostic(tmp_path):
     """One stray command in the log is a coverage gap, not a broken scan."""
     crontab = tmp_path / "root"

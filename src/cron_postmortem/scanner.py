@@ -211,7 +211,9 @@ def scan(options: ScanOptions) -> ScanResult:
     if empty_window is not None:
         warnings.append(empty_window)
 
-    cron_runs_by_job = _match_cron_runs(jobs, scan_data, diagnostics, warnings)
+    cron_runs_by_job = _match_cron_runs(
+        jobs, scan_data, diagnostics, warnings, options.crontab_user
+    )
     events_by_unit: dict[str, list] = {}
     for event in scan_data.unit_events:
         events_by_unit.setdefault(event.unit, []).append(event)
@@ -554,6 +556,7 @@ def _match_cron_runs(
     scan_data: LogScan,
     diagnostics: list[Diagnostic],
     warnings: list[ScanWarning],
+    crontab_user: str | None = None,
 ) -> dict[str, list[Run]]:
     """Attach observed ``CMD`` lines to the crontab entry that produced them."""
     by_key: dict[tuple[str, str], Job] = {}
@@ -590,14 +593,19 @@ def _match_cron_runs(
             f"entry ({len(unique)} distinct): {examples}"
         )
         if by_key and not runs:
-            warnings.append(_nothing_matched_warning(by_key, scan_data, summary))
+            warnings.append(
+                _nothing_matched_warning(by_key, scan_data, summary, crontab_user)
+            )
         else:
             diagnostics.append(Diagnostic(None, summary))
     return runs
 
 
 def _nothing_matched_warning(
-    by_key: dict[tuple[str, str], Job], scan_data: LogScan, summary: str
+    by_key: dict[tuple[str, str], Job],
+    scan_data: LogScan,
+    summary: str,
+    crontab_user: str | None = None,
 ) -> ScanWarning:
     """Crontab entries, cron runs in the log, and not one pair between them.
 
@@ -612,11 +620,27 @@ def _nothing_matched_warning(
     observed_users = sorted({observed.user for observed in scan_data.cron_runs})
     known_users = sorted({user for user, _ in by_key})
     if set(observed_users).isdisjoint(known_users):
+        if crontab_user is not None:
+            # Telling somebody to pass the option they passed is how a report
+            # gets closed as noise.  They named a user and the entries are not
+            # under it, so the name was overruled: by a system-format reading,
+            # which takes the user from the file, or by a second crontab the
+            # option was never meant for.
+            remedy = (
+                f"--crontab-user {crontab_user!r} was given, so the entries it "
+                "applies to were read as a system-format crontab (which names "
+                "its own user) or come from another --crontab file; check the "
+                "parse problems above and pass --crontab-format user if the "
+                "file has no user column"
+            )
+        else:
+            remedy = (
+                "a user-format crontab is attributed to root unless its "
+                "filename is the owner's name, so pass --crontab-user"
+            )
         cause = (
             f"the log's cron runs belong to {_names(observed_users)} but the "
-            f"crontab entries are attributed to {_names(known_users)}; a "
-            "user-format crontab is attributed to root unless its filename is "
-            "the owner's name, so pass --crontab-user"
+            f"crontab entries are attributed to {_names(known_users)}; {remedy}"
         )
     else:
         cause = (
