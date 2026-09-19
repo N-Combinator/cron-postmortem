@@ -16,7 +16,10 @@ finds something, so it drops straight into a monitoring check.
 It also refuses to report success when it checked nothing. A scan that found no
 schedules, or that understood not one line of the log it was given, prints a
 **warning** and exits non-zero: "no problems" and "nothing was looked at" have to be
-different answers to a monitoring check.
+different answers to a monitoring check. And when a log it did understand yields not one
+run that can be attributed to a scheduled job, the report is a page of missed runs that
+never happened, so that gets a **warning and an exit code of its own** (`3`) rather than
+the `1` a real outage returns.
 
 Zero runtime dependencies, Python 3.10+, Linux.
 
@@ -73,9 +76,9 @@ $ journalctl --since "24 hours ago" -o short-iso -u backup-db.service >> cron.lo
 
 | Option | Meaning |
 | --- | --- |
-| `--crontab PATH` | Crontab file to analyse (repeatable). Format is detected from the path; a user-format file is attributed to `root` unless the filename is a bare username. |
-| `--crontab-format {auto,user,system}` | Force whether crontabs carry a user column. |
-| `--crontab-user USER` | User to attribute user-format entries to, overriding the filename. |
+| `--crontab PATH` | Crontab file to analyse (repeatable). Whether it carries a user column is detected from its **contents** (see below); a user-format file is attributed to `root` unless the filename is a bare username. |
+| `--crontab-format {auto,user,system}` | Force whether crontabs carry a user column, overriding the detection — and the format `--discover` reads off the location. |
+| `--crontab-user USER` | User to attribute user-format entries to, overriding the filename. Applies to the files given with `--crontab`: a discovered file carries its own owner. Naming a user also says the file has no user column, so it settles a format the contents cannot (see below). |
 | `--systemctl-show PATH` | Captured `systemctl show <units>` output (repeatable). |
 | `--log-file PATH` | syslog or `journalctl` output (repeatable). |
 | `--journal` / `--discover` | Read logs / schedules from this host. |
@@ -85,7 +88,7 @@ $ journalctl --since "24 hours ago" -o short-iso -u backup-db.service >> cron.lo
 | `--format {json,markdown,both}` | Report format (default `markdown`). |
 | `--output PATH` | Write the report to a file instead of stdout. |
 | `--ignore {missed,overlap,failure}` | Suppress a finding kind (repeatable). |
-| `--exit-zero` | Always exit 0, even when problems are found. |
+| `--exit-zero` | Exit 0 when problems are found. Does not silence exit `2` or `3`, which say the report is not a verdict on the jobs. |
 
 ### Exit codes
 
@@ -94,19 +97,23 @@ $ journalctl --since "24 hours ago" -o short-iso -u backup-db.service >> cron.lo
 | `0` | Nothing wrong and the scan was conclusive (or `--exit-zero`). |
 | `1` | At least one missed run, overlap or failure — or a warning that the scan could not check what it was asked to. |
 | `2` | Usage error: unreadable input, unwritable output, or arguments that leave nothing to scan. |
+| `3` | The log was understood and not one run in it could be attributed to a scheduled job, so the missed runs in the report are an artefact of the comparison rather than an outage. Only returned when those entries are the whole report — `1` wins if anything else was found. |
 
 ### Warnings
 
 A warning means the report is not conclusive. It is listed under `## Warnings` in the
-Markdown report, appears in `warnings` in the JSON, and counts towards exit code 1 —
-`--exit-zero` silences the exit code, not the warning.
+Markdown report, appears in `warnings` in the JSON, is repeated on stderr — stdout is
+often a file or a dashboard, and that is exactly where "do not trust this" gets lost —
+and counts towards the exit code. `--exit-zero` silences the exit code for *findings*,
+not for a warning that exits `2` or `3`.
 
 | Code | Raised when | Exit |
 | --- | --- | ---: |
 | `no-schedules` | Not one crontab entry or timer was found, so every detector had nothing to run against. | `1` |
 | `no-log-lines` | No log source was given, or nothing in it parsed as a cron/systemd log line — check the format and the syslog identifier. | `1` |
 | `unsupported-timezone` | An `OnCalendar=` value names a timezone (see the limitations); that timer is excluded from missed-run detection. | `1` |
-| `no-runs-matched` | The log is full of cron runs and not one of them belongs to a crontab entry — usually the wrong user (see below) or a log from another host. | `1` |
+| `no-runs-matched` | Crontab entries were checked against an understood log, not one run was attributed to any of them, and missed runs were reported in their place — the log's cron runs all belong to something else, or it carries no cron line at all. | `3` / `1` |
+| `crontab-format-guessed` | One crontab whose format the entries did not settle between them matched none of the log's cron runs and came back with missed runs, while the rest of the scan did match — those missed runs may be an artefact of the reading. | `1` |
 | `implausible-log-dates` | A year-less syslog source was dated across more than 300 days with fewer lines than that span has days — the inferred years are probably wrong. | `1` |
 | `empty-window` | The tolerance is longer than the window it applies to, so no scheduled run could be judged. | `2` / `1` |
 
@@ -121,15 +128,62 @@ findings for a monitoring check, not a broken invocation. The same warning at ex
 means one *timer's* own slack (`AccuracySec` + `RandomizedDelaySec`, added to
 `--tolerance`) outlasted an otherwise usable window: only that job went unchecked.
 
-`no-runs-matched` is the other half of the same idea. A cron run is attributed to a
-crontab entry by `(user, command)` — the log line carries nothing else — so an entry
-read as belonging to the wrong user can never match, and every one of its occurrences
-comes back as a missed run. That is why a user-format file passed to `--crontab` is
+`no-runs-matched` is the other half of the same idea, and it has an exit code to
+itself. A cron run is attributed to a crontab entry by `(user, command)` — the log line
+carries nothing else — so an entry read as belonging to the wrong user, or with the user
+column left glued to the front of its command, can never match, and every one of its
+occurrences comes back as a missed run. A report like that is not a quieter version of
+an outage, it is a different claim: *some* entries never firing is a finding about those
+jobs, but *every* entry missing while the log was understood is a statement about the
+scan. The warning is raised on exactly that shape — at least one cron job among the
+schedules, a log at least one line of which was understood, not one run attributed to
+any entry, and at least one missed run reported in their place — and it exits `3` so a
+monitoring check can tell it from the `1` a real outage returns without parsing the
+report. The log does not have to carry cron runs of
+its own for this: a log with no `CMD` line in it at all (the wrong file, or a journal
+filtered by unit rather than by cron's identifier) reports the same full page of missed
+runs, and that is the commonest way to get zero matches. A log nothing at all was
+understood from is `no-log-lines` instead — the same scan, said once.
+
+That last condition is what keeps a healthy scan quiet. Zero matches is only a broken
+comparison if the comparison invented something: a window in which nothing was due —
+a narrow incident window, a monthly job looked at over an afternoon, a crontab of
+nothing but `@reboot` — matches nothing because there was nothing to match, and its
+report says `missed: 0`. There is nothing there to disown, so the scan exits `0` and
+what went unreconciled is recorded as a diagnostic instead.
+
+`--exit-zero` does not mute it, for the same reason it does not mute a usage
+error: the flag exists so a check does not page on findings, and these findings are not
+real. A log that only *partly* matches is the in-between case and stays a diagnostic.
+
+The warning disowns the crontab entries it could not reconcile, and nothing else, so
+`3` is only returned when those entries are the whole report. A failing timer, or a cron
+job whose runs *did* match, is a problem the crontab misreading cannot have invented;
+when the same scan finds one of those, the exit code is `1` — `1` wins wherever both
+apply — and the warning is still printed on stderr and listed in the report. With
+`--exit-zero` the findings are muted and `3` comes back, because the flag mutes findings
+and not the statement that the scan reconciled nothing.
+
+That is also why a user-format file passed to `--crontab` is
 attributed to `root` unless its name is a bare username: a collected crontab is usually
 named after the capture (`web01.crontab`, `root.txt`) rather than after its owner, and
 the name is only taken as the owner for the files found in a spool directory, where cron
 itself reads it that way. Pass `--crontab-user` when the entries belong to somebody
 else; a diagnostic names the user that was picked whenever the filename was not used.
+
+`crontab-format-guessed` covers the half `no-runs-matched` cannot see. When one
+crontab of several is misread the scan still matches the others, so the all-or-nothing
+test never fires and the misread file's entries come back as an ordinary-looking page of
+missed runs. When the format of that file had to be *guessed* — its entries did not
+settle it between them, or its user column was believed on repetition alone — and not
+one of its entries matched a cron run in a log that is carrying them while missed runs
+were reported for it, the guess is a likelier explanation than an outage, so it is said out loud on stderr and in the report
+rather than left as a diagnostic under the findings it invented. It exits `1`: there is
+a real report here, and part of it may be an artefact. A guess that matched its runs is
+not warned about — it was right, and the scan is clean. The format it names is the one
+the entries were *read* in, which is not always the one the vote reached: where
+`--crontab-user` overruled a system reading, the warning says so and points at
+`--crontab-format system`, not at the user format already in effect.
 
 The summary line `Log lines read N, understood M` (`log_lines_total` /
 `log_lines_parsed` in JSON) is there for the in-between case: a log source that is only
@@ -246,6 +300,69 @@ Log lines read 63, understood 62.
 | How long did it run? | For cron, the `pam_unix(cron:session)` open/close pair that brackets the `CMD` line. For systemd, the start and terminal lines for the unit. |
 | Did two runs collide? | Every *pair* of runs of the same job that was alive at the same time, not just neighbours in start order — one run hung for three hours is reported against each of the runs that started underneath it, and the reported overlap is the time the two actually ran side by side. |
 | Did it fail? | `Main process exited, code=exited, status=N`, `Failed with result '...'`, and `ActiveState` / `Result` from `systemctl show`. systemd's own verdict wins over the raw exit status, so a unit with `SuccessExitStatus=3` that exits 3 is healthy; `ExecMainStatus` decides only when the capture carries no `Result=`. |
+
+### Which crontabs carry a user column
+
+A system crontab (`/etc/crontab`, `/etc/cron.d/*`) puts the user who runs the job in
+field 6; a per-user crontab (`crontab -l`, the spool) starts the command there. Getting
+that wrong turns `root /usr/bin/x` into a command no log line can ever say, so every
+occurrence of every entry comes back missed — a wrong answer shaped like a finding.
+
+The **contents** decide, not the path, for every file you name. Those files are
+captures — `web01.crontab`, `crontab.txt`, `etc-crontab` — and their names say nothing
+about what is inside them. Every entry votes on what sits in field 6 (field 2 after an
+`@macro`) and the majority decides the whole file, since cron applies one format per
+file rather than one per line:
+
+- **system** — field 6 is a stock account (`root`, `www-data`, `postgres`, …), or the
+  word after it can only be the start of a command of its own — `[`, or a known command
+  word such as `flock` or `run-parts`. Nothing runs `backup` with `flock` as its first
+  argument, so there the command starts at field 7.
+- **user** — field 6 cannot be a user name, it carries a script extension (`backup.sh`,
+  `monitor.py`: an account no distribution ships), nothing follows it, it is a command
+  no distribution ships as an account (`python3`, `curl`, `logrotate`, …), or the word
+  after it is an option or a shell operator and so belongs to it.
+- **could be either, so it needs corroboration** — a bare plausible name in front of a
+  *path*. `0 3 * * * backup /data` is a system entry running `/data` as `backup` and a
+  per-user entry running `backup` on `/data`, and so is every per-user entry whose
+  command takes a file argument. Such a line decides nothing by itself; it counts only
+  once the rest of the file backs it up — another entry names an account outright, or
+  the very same word sits in field 6 of a second entry, which is what a user column does
+  and what a list of different commands does not. A file read as system format on
+  repetition alone is reported as a parse problem naming the word or words it believed.
+- **abstain** — neither shape fits. `*/5 * * * * backup archive` is the honest case:
+  `backup` is both a stock account and a plausible script name, and nothing in the line
+  can tell them apart.
+
+Ambiguity resolves deterministically: a tie — including a file whose entries all
+abstained — is read as **user format**, which is what `crontab -l` emits and what the
+spool holds, so it is what a collected crontab most often is. Whenever the entries were
+not unanimous the choice is reported as a parse problem naming the vote
+(`read as a user-format crontab, but its entries do not agree (1 look system-format,
+1 user-format …); pass --crontab-format if that is wrong`), and `--crontab-format
+user|system` settles it by hand. Lines too broken to be an entry in *either* format are
+left out of the tally entirely — they are reported as broken lines, not as ambiguity.
+
+`--crontab-user` is an answer to this question too: *who* runs these entries is only an
+open question in a file that has no user column, so naming a user overrules a system
+reading that rests on repetition alone, and the parse problem says which option decided
+it. Where the entries do name an account the file wins and the report says the
+`--crontab-user` given was not applied, rather than leaving the caller to wonder why the
+name they passed is nowhere in the output. `--crontab-format user|system` settles the
+format outright and stops the detection from running at all.
+
+The filename of a file you pass decides one thing, and only one: who owns a
+*user*-format file. That is a separate question from the format, and it is answered in
+the warnings section above.
+
+**`--discover` is the exception, and only there.** A file this tool finds itself is not
+a capture: cron reads `/etc/crontab` and `/etc/cron.d/*` with a user column and a spool
+file as the crontab of the user it is named after, and that is cron's own rule for the
+location rather than a guess about a filename. Discovery therefore passes the format and
+the owner it knows, and the vote above is not taken — a drop-in whose only entry is
+`*/1 * * * * deploy /opt/app/tick` is a system crontab no matter how that line reads on
+its own. `--crontab-format` overrides the location too, and since the location also
+names the owner, `--crontab-user` is applied only to the files given with `--crontab`.
 
 Supported log formats: traditional syslog (`Sep 18 03:00:01 host CRON[1234]: ...`) and
 the journalctl renderings `short-iso`, `short-iso-precise` and `short-full`. Traditional

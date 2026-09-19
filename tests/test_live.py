@@ -18,7 +18,7 @@ from cron_postmortem import crontab as crontab_mod
 from cron_postmortem.model import FAILURE, MISSED, OVERLAP
 from cron_postmortem.scanner import ScanOptions, scan
 
-from .conftest import FIXTURES, NOW
+from .conftest import FIXTURES, NOW, busy_cron_log
 
 NOW_ARG = "2026-09-18T12:00:00"
 SINCE_ARG = "2026-09-18T02:00:00"
@@ -203,3 +203,94 @@ def test_a_discovered_spool_crontab_is_still_owned_by_its_filename(host, etc):
     owners = {report.job.user for report in result.job_reports if report.job.source == "cron"}
     assert "john.doe" in owners
     assert not any("attributed to" in diag.message for diag in result.diagnostics)
+
+
+def test_a_cron_d_drop_in_keeps_its_user_column_whatever_one_entry_looks_like(
+    host, etc, tmp_path
+):
+    """Where cron reads the format from the location, so does this tool.
+
+    ``*/1 * * * * deploy /opt/app/tick`` is the commonest shape of drop-in there
+    is, and on its own the line reads both ways - a per-user entry running
+    ``deploy`` on a path is the same six fields.  Detecting the format from the
+    content therefore read it as a per-user crontab owned by the *file*, turned
+    every run into ``(webjobs) CMD (deploy /opt/app/tick)``, matched none of
+    them and reported an hour of missed runs: the failure issue #5 is about,
+    moved into ``cron-postmortem scan``.  /etc/cron.d has a user column by
+    cron's own rule, which is not a guess about a capture.
+    """
+    (etc / "cron.d" / "webjobs").write_text("*/1 * * * * deploy /opt/app/tick\n")
+    log = tmp_path / "syslog"
+    log.write_text(busy_cron_log("deploy", command="/opt/app/tick"))
+
+    result = scan(live_options(use_journal=False, log_paths=[log],
+                               since=datetime(2026, 9, 18, 3, 0, 0),
+                               until=datetime(2026, 9, 18, 4, 0, 0)))
+
+    drop_in = [
+        report for report in result.job_reports
+        if report.job.command == "/opt/app/tick"
+    ]
+    assert [(report.job.user, len(report.runs)) for report in drop_in] == [("deploy", 60)]
+    assert [
+        finding for finding in result.findings if finding.job_id == drop_in[0].job.id
+    ] == []
+    assert [warning.code for warning in result.warnings] == []
+
+
+def test_discovery_says_what_each_location_is_rather_than_guessing(monkeypatch, tmp_path):
+    """/etc/crontab and /etc/cron.d/* carry a user column; the spool does not."""
+    root = tmp_path / "host"
+    (root / "cron.d").mkdir(parents=True)
+    (root / "spool").mkdir()
+    (root / "etc").mkdir()
+    (root / "etc" / "crontab").write_text("0 3 * * * root /bin/true\n")
+    (root / "cron.d" / "webjobs").write_text("*/1 * * * * deploy /opt/app/tick\n")
+    (root / "spool" / "deploy").write_text("*/1 * * * * /opt/app/tick\n")
+    monkeypatch.setattr(crontab_mod, "SYSTEM_CRONTAB", root / "etc" / "crontab")
+    monkeypatch.setattr(crontab_mod, "CRON_D_DIRS", (root / "cron.d",))
+    monkeypatch.setattr(crontab_mod, "SPOOL_DIRS", (root / "spool",))
+
+    found, problems = crontab_mod.discover_crontab_files()
+
+    assert problems == []
+    assert [(item.path.name, item.format, item.filename_is_owner) for item in found] == [
+        ("crontab", "system", False),
+        ("webjobs", "system", False),
+        ("deploy", "user", True),
+    ]
+
+
+def test_the_format_option_still_overrides_what_discovery_found(host, etc, tmp_path):
+    """``--crontab-format user`` is the caller's answer, and it wins everywhere."""
+    (etc / "cron.d" / "webjobs").write_text("*/1 * * * * deploy /opt/app/tick\n")
+
+    result = scan(live_options(use_journal=False, crontab_format="user"))
+
+    users = {report.job.user for report in result.job_reports if report.job.source == "cron"}
+    assert "deploy" not in users
+    assert any(
+        report.job.command == "deploy /opt/app/tick" for report in result.job_reports
+    )
+
+
+def test_crontab_user_is_not_applied_to_the_files_discovery_found(host, etc, tmp_path):
+    """``--crontab-user`` answers a question the discovered files do not ask.
+
+    The spool says who owns a crontab by its filename and a system crontab says
+    so in every entry, so the option can only have been meant for the file the
+    caller named - applying it to the rest produced one "was not applied" line
+    per drop-in, all saying the same thing.
+    """
+    (etc / "cron.d" / "webjobs").write_text("*/1 * * * * deploy /opt/app/tick\n")
+    collected = tmp_path / "web01.crontab"
+    collected.write_text("* * * * * /usr/local/bin/poll.sh\n")
+
+    result = scan(live_options(crontab_paths=[collected], crontab_user="alice"))
+
+    assert not any("was not applied" in diag.message for diag in result.diagnostics)
+    owners = {
+        report.job.user for report in result.job_reports if report.job.source == "cron"
+    }
+    # The named file went to alice; the discovered ones kept their own owners.
+    assert {"alice", "root", "www-data", "deploy"} <= owners
