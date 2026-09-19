@@ -76,6 +76,40 @@ SYSTEM_FORMAT = "system"
 USER_FORMAT = "user"
 
 
+@dataclass(frozen=True)
+class DiscoveredCrontab:
+    """A crontab found where cron itself reads it, and what that location says.
+
+    Discovery is the one case where the path is not a guess.  ``/etc/crontab``
+    and ``/etc/cron.d/*`` are read by cron with a user column and a spool file
+    is read as the crontab of the user it is named after - that is cron's own
+    rule, not an inference about a capture, so :func:`detect_format` has nothing
+    to add there and can only get it wrong (a drop-in whose one entry is
+    ``*/1 * * * * deploy /opt/app/tick`` says nothing a single line can settle).
+    A file the caller names is a capture and goes on being read by content.
+    """
+
+    path: Path
+    format: str
+    filename_is_owner: bool
+
+
+@dataclass(frozen=True)
+class CrontabRead:
+    """One crontab file as this tool read it.
+
+    ``detection`` is the vote :func:`detect_format` took, or ``None`` when the
+    format did not have to be worked out from the content - the caller passed
+    ``--crontab-format`` or the file was discovered where cron's own rule
+    applies.  The scanner keeps it because a format nobody vouched for is the
+    first suspect when the entries then match nothing in the log.
+    """
+
+    jobs: list[Job]
+    problems: list[str]
+    detection: FormatDetection | None = None
+
+
 def normalize_command(command: str) -> str:
     """Collapse whitespace so a crontab entry can be compared to a log line."""
     return " ".join(command.split())
@@ -143,6 +177,17 @@ class FormatDetection:
         and not enough to overrule a caller who said otherwise.
         """
         return self.system_format and self.system_votes == self.repeated_votes
+
+    @property
+    def guessed(self) -> bool:
+        """The entries did not settle the format between them.
+
+        Either they disagreed, or some of them said nothing, or the user column
+        was read in on repetition alone.  The format decides where every command
+        starts, so a scan whose comparison then comes up empty has a likelier
+        explanation than an outage; :mod:`~cron_postmortem.scanner` says so.
+        """
+        return not self.unanimous or self.rests_on_repetition
 
     @property
     def name(self) -> str:
@@ -371,16 +416,19 @@ def load_crontab_file(
     user_override: str | None = None,
     *,
     trust_filename: bool = False,
-) -> tuple[list[Job], list[str]]:
+) -> CrontabRead:
     """Read one crontab file from disk.
 
+    ``format_override`` is ``"auto"`` for a file whose format nothing but its
+    content can say; discovery passes the format cron itself uses for the
+    location (see :class:`DiscoveredCrontab`), as does ``--crontab-format``.
     ``trust_filename`` says the file was found in a spool directory, where the
     name is the owner's; see :func:`default_user_for`.
     """
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
-        return [], [f"{path}: cannot read ({exc.strerror or exc})"]
+        return CrontabRead([], [f"{path}: cannot read ({exc.strerror or exc})"])
     detection: FormatDetection | None = None
     overruled_by_user = False
     if format_override == "auto":
@@ -442,21 +490,23 @@ def load_crontab_file(
             f"entries attributed to {user!r} - pass --crontab-user if they "
             "belong to somebody else"
         )
-    return jobs, problems
+    return CrontabRead(jobs, problems, detection)
 
 
-def discover_crontab_files() -> tuple[list[Path], list[str]]:
+def discover_crontab_files() -> tuple[list[DiscoveredCrontab], list[str]]:
     """Every crontab file on this host that we are allowed to read.
 
     Spool directories are mode 0700 root, so a non-root scan legitimately cannot
     list them; that is reported as a problem rather than raised, so the rest of
     the scan still produces a report.
     """
-    found: list[Path] = []
+    found: list[DiscoveredCrontab] = []
     problems: list[str] = []
     if SYSTEM_CRONTAB.is_file():
-        found.append(SYSTEM_CRONTAB)
-    for directory in (*CRON_D_DIRS, *SPOOL_DIRS):
+        found.append(DiscoveredCrontab(SYSTEM_CRONTAB, SYSTEM_FORMAT, False))
+    directories = [(directory, SYSTEM_FORMAT, False) for directory in CRON_D_DIRS]
+    directories += [(directory, USER_FORMAT, True) for directory in SPOOL_DIRS]
+    for directory, file_format, filename_is_owner in directories:
         try:
             entries = sorted(directory.iterdir())
         except FileNotFoundError:
@@ -473,5 +523,5 @@ def discover_crontab_files() -> tuple[list[Path], list[str]]:
             if not os.access(entry, os.R_OK):
                 problems.append(f"{entry}: not readable; run as root to include it")
                 continue
-            found.append(entry)
+            found.append(DiscoveredCrontab(entry, file_format, filename_is_owner))
     return found, problems

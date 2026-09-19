@@ -106,7 +106,7 @@ def test_a_file_whose_entries_disagree_says_so(tmp_path):
     collected = tmp_path / "root"
     collected.write_text("0 1 * * * root /usr/bin/a\n0 3 * * * /usr/bin/c\n")
 
-    _, problems = crontab.load_crontab_file(collected)
+    problems = crontab.load_crontab_file(collected).problems
 
     assert len(problems) == 1
     assert "read as a user-format crontab" in problems[0]
@@ -118,7 +118,9 @@ def test_an_unambiguous_file_is_read_without_comment(tmp_path):
     collected = tmp_path / "root"
     collected.write_text("0 1 * * * root /usr/bin/a\n0 3 * * * root /usr/bin/b\n")
 
-    jobs, problems = crontab.load_crontab_file(collected)
+    read = crontab.load_crontab_file(collected)
+
+    jobs, problems = read.jobs, read.problems
 
     assert [job.command for job in jobs] == ["/usr/bin/a", "/usr/bin/b"]
     assert problems == []
@@ -181,7 +183,9 @@ def test_a_user_column_taken_on_repetition_alone_says_so(tmp_path):
     collected = tmp_path / "web01.crontab"
     collected.write_text("0 3 * * * deploy /opt/a.sh\n0 4 * * * deploy /opt/b.sh\n")
 
-    jobs, problems = crontab.load_crontab_file(collected)
+    read = crontab.load_crontab_file(collected)
+
+    jobs, problems = read.jobs, read.problems
 
     assert [(job.user, job.command) for job in jobs] == [
         ("deploy", "/opt/a.sh"),
@@ -202,7 +206,9 @@ def test_naming_the_user_settles_a_format_no_entry_backs_up(tmp_path):
     collected = tmp_path / "web01.crontab"
     collected.write_text("0 3 * * * deploy /opt/a.sh\n0 4 * * * deploy /opt/b.sh\n")
 
-    jobs, problems = crontab.load_crontab_file(collected, user_override="alice")
+    read = crontab.load_crontab_file(collected, user_override="alice")
+
+    jobs, problems = read.jobs, read.problems
 
     assert [(job.user, job.command) for job in jobs] == [
         ("alice", "deploy /opt/a.sh"),
@@ -219,7 +225,9 @@ def test_naming_the_user_does_not_overrule_entries_that_name_an_account(tmp_path
     collected = tmp_path / "web01.crontab"
     collected.write_text("0 3 * * * root /usr/bin/a\n")
 
-    jobs, problems = crontab.load_crontab_file(collected, user_override="alice")
+    read = crontab.load_crontab_file(collected, user_override="alice")
+
+    jobs, problems = read.jobs, read.problems
 
     assert [(job.user, job.command) for job in jobs] == [("root", "/usr/bin/a")]
     assert len(problems) == 1
@@ -237,7 +245,9 @@ def test_the_format_override_still_wins_over_the_content(tmp_path):
     collected = tmp_path / "root"
     collected.write_text("*/5 * * * * root /usr/bin/x\n")
 
-    jobs, problems = crontab.load_crontab_file(collected, format_override="user")
+    read = crontab.load_crontab_file(collected, format_override="user")
+
+    jobs, problems = read.jobs, read.problems
 
     assert [(job.user, job.command) for job in jobs] == [("root", "root /usr/bin/x")]
     # Forced by hand, so the scan does not second-guess the content.
@@ -272,7 +282,9 @@ def test_an_attributed_crontab_says_which_user_it_picked(tmp_path):
     collected = tmp_path / "web01.crontab"
     collected.write_text("* * * * * /usr/local/bin/poll.sh\n")
 
-    jobs, problems = crontab.load_crontab_file(collected)
+    read = crontab.load_crontab_file(collected)
+
+    jobs, problems = read.jobs, read.problems
 
     assert [job.user for job in jobs] == ["root"]
     assert len(problems) == 1
@@ -284,18 +296,22 @@ def test_an_explicit_user_silences_the_attribution_note(tmp_path):
     collected = tmp_path / "web01.crontab"
     collected.write_text("* * * * * /usr/local/bin/poll.sh\n")
 
-    jobs, problems = crontab.load_crontab_file(collected, user_override="alice")
+    read = crontab.load_crontab_file(collected, user_override="alice")
+
+    jobs, problems = read.jobs, read.problems
 
     assert [job.user for job in jobs] == ["alice"]
     assert problems == []
 
 
 def test_load_from_disk_autodetects(fixtures):
-    system, problems = crontab.load_crontab_file(fixtures / "etc" / "crontab")
+    read = crontab.load_crontab_file(fixtures / "etc" / "crontab")
+    system, problems = read.jobs, read.problems
     assert problems == []
     assert {job.user for job in system} == {"root", "www-data"}
 
-    user, problems = crontab.load_crontab_file(fixtures / "spool" / "root")
+    read = crontab.load_crontab_file(fixtures / "spool" / "root")
+    user, problems = read.jobs, read.problems
     assert problems == []
     assert [job.command for job in user] == ["/usr/local/bin/heartbeat.sh"]
     assert user[0].user == "root"
@@ -321,8 +337,10 @@ def test_the_same_jobs_in_both_formats_come_out_the_same(tmp_path):
         "17 * * * * /usr/local/bin/rotate-cache.sh\n"
     )
 
-    from_system, system_problems = crontab.load_crontab_file(system)
-    from_user, user_problems = crontab.load_crontab_file(per_user)
+    read_system = crontab.load_crontab_file(system)
+    read_user = crontab.load_crontab_file(per_user)
+    from_system, system_problems = read_system.jobs, read_system.problems
+    from_user, user_problems = read_user.jobs, read_user.problems
 
     assert system_problems == []
     # Neither file's format is in doubt; the one note is about the *owner* of
@@ -339,7 +357,8 @@ def test_the_same_jobs_in_both_formats_come_out_the_same(tmp_path):
 
 
 def test_unreadable_file_is_a_problem_not_a_crash(tmp_path):
-    jobs, problems = crontab.load_crontab_file(tmp_path / "nope")
+    read = crontab.load_crontab_file(tmp_path / "nope")
+    jobs, problems = read.jobs, read.problems
     assert jobs == []
     assert len(problems) == 1
 
@@ -380,7 +399,7 @@ def test_discovery_collects_readable_files(monkeypatch, tmp_path):
     monkeypatch.setattr(crontab, "SPOOL_DIRS", (spool,))
 
     found, problems = crontab.discover_crontab_files()
-    assert found == [spool / "root"]
+    assert [item.path for item in found] == [spool / "root"]
     assert problems == []
 
 

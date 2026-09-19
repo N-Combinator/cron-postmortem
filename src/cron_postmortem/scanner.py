@@ -33,6 +33,10 @@ DEFAULT_WINDOW = timedelta(hours=24)
 DEFAULT_TOLERANCE = 120.0
 UNMATCHED_EXAMPLES = 5
 
+# A crontab this tool had to guess the format of, whose entries then matched
+# nothing in a log that does carry cron runs; see _guessed_format_warnings.
+CRONTAB_FORMAT_GUESSED = "crontab-format-guessed"
+
 
 @dataclass
 class ScanOptions:
@@ -178,7 +182,8 @@ def scan(options: ScanOptions) -> ScanResult:
     warnings: list[ScanWarning] = []
     sources: dict[str, list[str]] = {"crontabs": [], "systemctl_show": [], "logs": []}
 
-    jobs, unit_states = _collect_jobs(options, diagnostics, sources)
+    guessed_formats: dict[str, crontab_mod.FormatDetection] = {}
+    jobs, unit_states = _collect_jobs(options, diagnostics, sources, guessed_formats)
     if not jobs:
         warnings.append(_no_schedules_warning(options, sources))
     states_by_id = {state.unit: state for state in unit_states}
@@ -214,6 +219,15 @@ def scan(options: ScanOptions) -> ScanResult:
     cron_runs_by_job = _match_cron_runs(
         jobs, scan_data, diagnostics, warnings, options.crontab_user
     )
+    if scan_data.cron_runs and not any(
+        warning.code == NO_RUNS_MATCHED for warning in warnings
+    ):
+        # The all-or-nothing case is already the loudest thing this tool says;
+        # this is the same mistake in one crontab out of several, which used to
+        # leave nothing but a diagnostic under the missed runs it invented.
+        warnings.extend(
+            _guessed_format_warnings(jobs, guessed_formats, cron_runs_by_job)
+        )
     events_by_unit: dict[str, list] = {}
     for event in scan_data.unit_events:
         events_by_unit.setdefault(event.unit, []).append(event)
@@ -371,27 +385,53 @@ def _seconds(value: float) -> str:
 
 
 def _collect_jobs(
-    options: ScanOptions, diagnostics: list[Diagnostic], sources: dict[str, list[str]]
+    options: ScanOptions,
+    diagnostics: list[Diagnostic],
+    sources: dict[str, list[str]],
+    guessed_formats: dict[str, crontab_mod.FormatDetection],
 ) -> tuple[list[Job], list[systemd.UnitState]]:
     jobs: list[Job] = []
-    # The filename is the owner only for the files discovery found in a spool
-    # directory; a path given on the command line is named by whoever collected
-    # it (see crontab.default_user_for).
-    paths: list[tuple[Path, bool]] = [(path, False) for path in options.crontab_paths]
+    # A path the caller names is a capture: neither its format nor its owner can
+    # be read off the filename, so the content decides and --crontab-user says
+    # who the entries belong to.  A path discovery found is a file cron itself
+    # reads, and cron's rule for the location is better information than any
+    # vote over the entries - /etc/cron.d/webjobs holding one
+    # "*/1 * * * * deploy /opt/app/tick" is a system crontab whatever that line
+    # looks like on its own.  The location names the owner too (the spool
+    # filename, or the entries' own user column), so --crontab-user, which the
+    # caller can only have meant for the file they named, is not applied there.
+    to_read: list[tuple[crontab_mod.DiscoveredCrontab, str | None]] = [
+        (
+            crontab_mod.DiscoveredCrontab(path, options.crontab_format, False),
+            options.crontab_user,
+        )
+        for path in options.crontab_paths
+    ]
     if options.discover:
         discovered, problems = crontab_mod.discover_crontab_files()
-        paths.extend((path, True) for path in discovered)
-        diagnostics.extend(Diagnostic(None, problem) for problem in problems)
-    for path, trust_filename in paths:
-        found, problems = crontab_mod.load_crontab_file(
-            path,
-            options.crontab_format,
-            options.crontab_user,
-            trust_filename=trust_filename,
+        to_read.extend(
+            (
+                found if options.crontab_format == "auto"
+                else replace(found, format=options.crontab_format),
+                None,
+            )
+            for found in discovered
         )
-        jobs.extend(found)
-        sources["crontabs"].append(str(path))
-        diagnostics.extend(Diagnostic(None, problem, str(path)) for problem in problems)
+        diagnostics.extend(Diagnostic(None, problem) for problem in problems)
+    for source, user_override in to_read:
+        read = crontab_mod.load_crontab_file(
+            source.path,
+            source.format,
+            user_override,
+            trust_filename=source.filename_is_owner,
+        )
+        jobs.extend(read.jobs)
+        sources["crontabs"].append(str(source.path))
+        diagnostics.extend(
+            Diagnostic(None, problem, str(source.path)) for problem in read.problems
+        )
+        if read.detection is not None and read.detection.guessed:
+            guessed_formats[str(source.path)] = read.detection
     jobs = _merge_cron_duplicates(jobs)
 
     unit_states: list[systemd.UnitState] = []
@@ -655,6 +695,59 @@ def _nothing_matched_warning(
         f"not one cron run in the log could be attributed to a crontab entry, "
         f"so every scheduled cron run counts as missed: {cause}. {summary}",
     )
+
+
+def _guessed_format_warnings(
+    jobs: list[Job],
+    guessed_formats: dict[str, crontab_mod.FormatDetection],
+    cron_runs_by_job: dict[str, list[Run]],
+) -> list[ScanWarning]:
+    """A crontab whose format was guessed, and whose entries then matched nothing.
+
+    The format decides where every command starts, so reading it wrong does not
+    lose a run here and there - it loses all of that file's runs and reports one
+    missed occurrence in their place.  When the file's format was worked out
+    from entries that did not settle it (:attr:`FormatDetection.guessed`) and
+    not one of its entries can be found in a log that *is* carrying cron runs,
+    the guess is the likelier explanation of the page of missed runs than an
+    outage is, and the caller has to be told before they act on it.
+
+    ``no-runs-matched`` already covers the case where this happened to the whole
+    scan.  This one is for the crontab that is wrong next to one that is right,
+    which that warning cannot see: the report exits 1 with a plausible-looking
+    outage in it and, until now, an empty stderr.
+    """
+    warnings: list[ScanWarning] = []
+    for path, detection in guessed_formats.items():
+        entries = [job for job in jobs if job.source == CRON and path in _origins(job)]
+        if not entries or any(cron_runs_by_job.get(job.id) for job in entries):
+            continue
+        other = (
+            crontab_mod.USER_FORMAT
+            if detection.system_format
+            else crontab_mod.SYSTEM_FORMAT
+        )
+        warnings.append(
+            ScanWarning(
+                CRONTAB_FORMAT_GUESSED,
+                f"{path}: read as a {detection.name}-format crontab, but its "
+                f"entries did not settle that between them, and not one of its "
+                f"{len(entries)} entries matched a cron run in the log; the "
+                "missed runs reported for them may be an artefact of that "
+                f"reading rather than an outage - pass --crontab-format {other} "
+                "if it is wrong (see the parse problems in the report)",
+            )
+        )
+    return warnings
+
+
+def _origins(job: Job) -> set[str]:
+    """The crontab files a job's entries came from.
+
+    ``Job.origin`` is ``path:lineno``, and a job merged from two entries carries
+    both, comma-separated (see :func:`_merge_cron_duplicates`).
+    """
+    return {part.rsplit(":", 1)[0] for part in job.origin.split(", ")}
 
 
 def _names(users: list[str]) -> str:

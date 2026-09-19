@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from pathlib import Path
 
 from cron_postmortem import cli
 from cron_postmortem.report import to_json, to_markdown
 from cron_postmortem.scanner import ScanOptions, scan
 
-from .conftest import NOW
+from .conftest import NOW, busy_cron_log
 
 NOW_ARG = "2026-09-18T12:00:00"
 
@@ -416,31 +417,11 @@ def test_a_timer_whose_slack_outlasts_the_window_warns_without_a_usage_error(tmp
     assert "3720s" in result.warnings[0].message
 
 
-# One command, running every minute for an hour, as the user named below: the
-# shape of an offline capture where the crontab and the log do line up.
-def _busy_log(user: str, command: str = "/usr/local/bin/poll.sh") -> str:
-    lines = []
-    for minute in range(60):
-        stamp = f"Sep 18 03:{minute:02d}:01"
-        end = f"Sep 18 03:{minute:02d}:06"
-        pid = 1000 + minute * 2
-        lines.append(
-            f"{stamp} h CRON[{pid}]: pam_unix(cron:session): "
-            f"session opened for user {user}"
-        )
-        lines.append(f"{stamp} h CRON[{pid + 1}]: ({user}) CMD ({command})")
-        lines.append(
-            f"{end} h CRON[{pid}]: pam_unix(cron:session): "
-            f"session closed for user {user}"
-        )
-    return "\n".join(lines) + "\n"
-
-
 def busy_options(tmp_path, log_user: str, name: str = "collected.crontab", **kwargs):
     crontab = tmp_path / name
     crontab.write_text("* * * * * /usr/local/bin/poll.sh\n")
     log = tmp_path / "syslog"
-    log.write_text(_busy_log(log_user))
+    log.write_text(busy_cron_log(log_user))
     kwargs.setdefault("now", NOW)
     return ScanOptions(
         crontab_paths=[crontab],
@@ -508,7 +489,7 @@ def test_a_command_with_a_file_argument_is_not_read_as_a_user_column(tmp_path):
     crontab_file = tmp_path / "web01.crontab"
     crontab_file.write_text("* * * * * backup.sh /data\n")
     log = tmp_path / "syslog"
-    log.write_text(_busy_log("alice", command="backup.sh /data"))
+    log.write_text(busy_cron_log("alice", command="backup.sh /data"))
 
     result = scan(
         ScanOptions(
@@ -537,7 +518,7 @@ def test_the_warning_does_not_ask_for_the_option_that_was_already_passed(tmp_pat
     crontab_file = tmp_path / "web01.crontab"
     crontab_file.write_text("* * * * * root /usr/local/bin/poll.sh\n")
     log = tmp_path / "syslog"
-    log.write_text(_busy_log("alice"))
+    log.write_text(busy_cron_log("alice"))
 
     result = scan(
         ScanOptions(
@@ -578,7 +559,7 @@ def test_cron_runs_with_no_crontab_at_all_are_not_the_same_complaint(tmp_path):
     show = tmp_path / "show.txt"
     show.write_text(TIMER_SLACK_SHOW)
     log = tmp_path / "syslog"
-    log.write_text(_busy_log("root"))
+    log.write_text(busy_cron_log("root"))
 
     result = scan(ScanOptions(
         show_paths=[show], log_paths=[log], now=NOW,
@@ -607,7 +588,7 @@ def _system_capture(tmp_path, name: str = "web01.crontab") -> tuple:
     crontab = tmp_path / name
     crontab.write_text(SYSTEM_CAPTURE)
     log = tmp_path / "syslog"
-    log.write_text(_busy_log("root"))
+    log.write_text(busy_cron_log("root"))
     return crontab, log
 
 
@@ -868,3 +849,140 @@ def test_the_implausible_date_warning_is_not_a_usage_error(tmp_path):
     ])
 
     assert code == 1
+
+
+# --- a format that was guessed, in a scan that otherwise matched fine ----------
+
+# One crontab whose entries settle nothing between them (a plain word in front
+# of a path reads as a user column and as a command with a file argument), next
+# to one that the log agrees with line for line.  "no-runs-matched" cannot see
+# this: something did match, so the scan looks like an ordinary outage report.
+GUESSABLE = "*/1 * * * * deploy /opt/app/tick\n"
+MATCHING = "* * * * * /usr/local/bin/poll.sh\n"
+
+
+def _mixed_crontabs(tmp_path) -> tuple[Path, Path, Path, Path]:
+    guessed = tmp_path / "webjobs"
+    guessed.write_text(GUESSABLE)
+    matching = tmp_path / "root"
+    matching.write_text(MATCHING)
+    matching_log = tmp_path / "syslog-root"
+    matching_log.write_text(busy_cron_log("root"))
+    other_log = tmp_path / "syslog-deploy"
+    other_log.write_text(busy_cron_log("deploy", command="/opt/app/tick"))
+    return guessed, matching, matching_log, other_log
+
+
+def _mixed_options(tmp_path, **kwargs) -> ScanOptions:
+    guessed, matching, matching_log, other_log = _mixed_crontabs(tmp_path)
+    return ScanOptions(
+        crontab_paths=[matching, guessed],
+        log_paths=[matching_log, other_log],
+        since=datetime(2026, 9, 18, 3, 0, 0),
+        until=datetime(2026, 9, 18, 4, 0, 0),
+        now=NOW,
+        **kwargs,
+    )
+
+
+def test_a_guessed_format_that_matched_nothing_is_a_warning_not_a_diagnostic(tmp_path):
+    """The misread crontab next to a healthy one.
+
+    Its sixty missed runs read exactly like an outage, and the only trace of the
+    guess used to be a diagnostic buried in the report: no stderr line, no
+    warnings entry, nothing a monitoring check could act on.
+    """
+    result = scan(_mixed_options(tmp_path))
+
+    assert codes(result) == ["crontab-format-guessed"]
+    assert result.alerts is True
+    assert result.usage_error is False
+    message = result.warnings[0].message
+    assert str(tmp_path / "webjobs") in message
+    assert "did not settle that between them" in message
+    assert "--crontab-format system" in message
+    # The healthy crontab is untouched by it.
+    matched = [report for report in result.job_reports if report.runs]
+    assert [report.job.command for report in matched] == ["/usr/local/bin/poll.sh"]
+
+
+def test_naming_the_format_answers_the_warning(tmp_path):
+    """Nothing was guessed, so nothing is warned about - and the runs match."""
+    guessed = tmp_path / "webjobs"
+    guessed.write_text(GUESSABLE)
+    log = tmp_path / "syslog"
+    log.write_text(busy_cron_log("deploy", command="/opt/app/tick"))
+
+    result = scan(ScanOptions(
+        crontab_paths=[guessed], log_paths=[log], now=NOW,
+        crontab_format="system",
+        since=datetime(2026, 9, 18, 3, 0, 0),
+        until=datetime(2026, 9, 18, 4, 0, 0),
+    ))
+
+    assert codes(result) == []
+    assert result.problems == 0
+    assert [
+        (report.job.user, report.job.command, len(report.runs))
+        for report in result.job_reports
+    ] == [("deploy", "/opt/app/tick", 60)]
+
+
+def test_a_guessed_format_whose_entries_did_match_says_nothing(tmp_path):
+    """The guess is only suspect once it has cost the scan its matches.
+
+    ``backup /data`` settles nothing either, but here the log says exactly that
+    - the reading was right, and a warning would be noise on a clean scan.
+    """
+    crontab_file = tmp_path / "web01.crontab"
+    crontab_file.write_text("* * * * * backup /data\n")
+    log = tmp_path / "syslog"
+    log.write_text(busy_cron_log("root", command="backup /data"))
+
+    result = scan(ScanOptions(
+        crontab_paths=[crontab_file], log_paths=[log], now=NOW,
+        since=datetime(2026, 9, 18, 3, 0, 0),
+        until=datetime(2026, 9, 18, 4, 0, 0),
+    ))
+
+    assert len(result.job_reports[0].runs) == 60
+    assert (codes(result), result.problems) == ([], 0)
+
+
+def test_a_scan_that_reconciled_nothing_at_all_keeps_its_own_warning(tmp_path):
+    """One warning per scan, and the all-or-nothing one outranks this."""
+    guessed = tmp_path / "webjobs"
+    guessed.write_text(GUESSABLE)
+    log = tmp_path / "syslog"
+    log.write_text(busy_cron_log("deploy", command="/opt/app/tick"))
+
+    result = scan(ScanOptions(
+        crontab_paths=[guessed], log_paths=[log], now=NOW,
+        since=datetime(2026, 9, 18, 3, 0, 0),
+        until=datetime(2026, 9, 18, 4, 0, 0),
+    ))
+
+    assert codes(result) == ["no-runs-matched"]
+
+
+def test_the_cli_prints_the_guessed_format_warning_and_exits_one(tmp_path, capsys):
+    guessed, matching, matching_log, other_log = _mixed_crontabs(tmp_path)
+
+    code = cli.main([
+        "scan",
+        "--crontab", str(matching), "--crontab", str(guessed),
+        "--log-file", str(matching_log), "--log-file", str(other_log),
+        "--since", "2026-09-18T03:00:00", "--until", "2026-09-18T04:00:00",
+        "--now", NOW_ARG, "--format", "json",
+    ])
+
+    captured = capsys.readouterr()
+    # A real report with a warning on it: 1, not the 3 a scan that reconciled
+    # nothing gets.
+    assert code == cli.EXIT_PROBLEMS
+    assert "cron-postmortem: crontab-format-guessed:" in captured.err
+    report = json.loads(captured.out)
+    assert [warning["code"] for warning in report["warnings"]] == [
+        "crontab-format-guessed"
+    ]
+    assert report["summary"]["warnings"] == 1
