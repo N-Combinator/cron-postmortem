@@ -123,7 +123,9 @@ class ScanWarning:
     reason in reverse: the scan did run, and produced a full page of missed
     runs that are not real.  A monitoring check that cannot tell that page from
     a genuine outage acts on fiction, so it must be able to tell them apart
-    from the exit code alone.
+    from the exit code alone.  It disowns those entries and nothing else, so a
+    scan that also found a real problem still exits 1; see
+    ``ScanResult.standing_findings``.
     """
 
     code: str

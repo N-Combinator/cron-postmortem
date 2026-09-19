@@ -605,6 +605,104 @@ def test_exit_zero_does_not_silence_a_scan_that_matched_nothing(tmp_path, capsys
     assert code == cli.EXIT_NO_MATCH
 
 
+# A failing timer in the same scan.  Nothing about it goes through the crontab
+# matching that no-runs-matched complains about, so the warning cannot disown it.
+FAILING_SHOW = """\
+Id=backup.timer
+Description=Nightly backup timer
+LoadState=loaded
+ActiveState=active
+SubState=waiting
+Unit=backup.service
+AccuracyUSec=1min
+RandomizedDelayUSec=0
+TimersCalendar={ OnCalendar=*-*-* 03:30:00 ; next_elapse=n/a }
+
+Id=backup.service
+Description=Nightly backup
+LoadState=loaded
+ActiveState=failed
+SubState=failed
+Result=exit-code
+ExecMainStatus=1
+Type=oneshot
+"""
+
+FAILING_JOURNAL = (
+    "2026-09-18T03:30:01+0200 h systemd[1]: Starting backup.service - Nightly backup...\n"
+    "2026-09-18T03:30:09+0200 h systemd[1]: backup.service: Main process exited, "
+    "code=exited, status=1/FAILURE\n"
+    "2026-09-18T03:30:09+0200 h systemd[1]: backup.service: Failed with result 'exit-code'.\n"
+    "2026-09-18T03:30:09+0200 h systemd[1]: Failed to start backup.service - Nightly backup.\n"
+)
+
+
+def _mixed_argv(tmp_path, *extra: str) -> list[str]:
+    """A crontab that reconciles with nothing, next to a timer that really failed."""
+    crontab, log = _system_capture(tmp_path)
+    show = tmp_path / "show.txt"
+    show.write_text(FAILING_SHOW)
+    journal = tmp_path / "journal.log"
+    journal.write_text(FAILING_JOURNAL)
+    return _scan_argv(
+        crontab, log,
+        "--systemctl-show", str(show), "--log-file", str(journal),
+        "--crontab-format", "user", *extra,
+    )
+
+
+def test_a_real_failure_next_to_an_unmatched_crontab_still_exits_one(tmp_path, capsys):
+    """Exit 3 means "do not act on this report", so it may not swallow an outage.
+
+    The warning disowns the crontab entries it could not reconcile and nothing
+    else; ``backup.service`` failed on the host, which no amount of crontab
+    misreading can invent.  Coming back as 3 would tell a monitoring check to
+    treat a real failure as a scan problem and not page.
+    """
+    code = cli.main(_mixed_argv(tmp_path, "--format", "json"))
+
+    captured = capsys.readouterr()
+    assert code == cli.EXIT_PROBLEMS
+    # The warning is not suppressed by the promotion - only the exit code moves.
+    assert "cron-postmortem: no-runs-matched:" in captured.err
+    report = json.loads(captured.out)
+    assert [warning["code"] for warning in report["warnings"]] == ["no-runs-matched"]
+    assert report["summary"]["failure"] >= 1
+    assert {
+        finding["job_id"] for finding in report["findings"] if finding["kind"] == "failure"
+    } == {"systemd:backup.timer"}
+
+
+def test_only_the_unmatched_crontab_findings_are_disowned(tmp_path):
+    """The property the exit code is decided on, checked directly."""
+    crontab, log = _system_capture(tmp_path)
+    show = tmp_path / "show.txt"
+    show.write_text(FAILING_SHOW)
+    journal = tmp_path / "journal.log"
+    journal.write_text(FAILING_JOURNAL)
+
+    result = scan(ScanOptions(
+        crontab_paths=[crontab], show_paths=[show], log_paths=[log, journal],
+        crontab_format="user", now=NOW,
+        since=datetime(2026, 9, 18, 3, 0, 0),
+        until=datetime(2026, 9, 18, 4, 0, 0),
+    ))
+
+    assert codes(result) == ["no-runs-matched"]
+    assert result.problems > 1
+    assert {finding.job_id for finding in result.standing_findings} == {
+        "systemd:backup.timer"
+    }
+
+
+def test_exit_zero_mutes_the_failure_but_not_the_broken_scan(tmp_path, capsys):
+    """The flag mutes findings; the warning is not a finding, so 3 comes back."""
+    code = cli.main(_mixed_argv(tmp_path, "--exit-zero"))
+
+    capsys.readouterr()
+    assert code == cli.EXIT_NO_MATCH
+
+
 def test_the_misdetected_system_crontab_now_scans_clean(tmp_path, capsys):
     """Acceptance criterion 3's regression: the fixture that started the issue.
 

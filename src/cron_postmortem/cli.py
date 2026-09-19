@@ -217,10 +217,18 @@ def main(argv: list[str] | None = None) -> int:
         # a monitoring check, it must not mute a broken invocation.
         return EXIT_USAGE
     if result.no_runs_matched:
-        # Also outranks --exit-zero, and for the same reason: the flag exists so
-        # a monitoring check does not page on findings, and these findings are
-        # not real.  Swallowing this one is how a misread crontab passes for a
-        # clean bill of health - or for an outage that never happened.
+        # 3 says "do not act on this report", so it may only be returned when
+        # the unreconciled cron entries are the whole of it.  A systemd failure
+        # in the same scan is a real outage the cron-matching problem cannot
+        # have invented, and downgrading it to "scan problem" loses the page.
+        # 1 wins where both apply; the warning is still printed and reported.
+        if result.standing_findings and not args.exit_zero:
+            return EXIT_PROBLEMS
+        # Outranks --exit-zero, and for the same reason usage errors do: the
+        # flag exists so a monitoring check does not page on findings, and
+        # these findings are not real.  Swallowing this one is how a misread
+        # crontab passes for a clean bill of health - or for an outage that
+        # never happened.
         return EXIT_NO_MATCH
     if result.alerts and not args.exit_zero:
         return EXIT_PROBLEMS

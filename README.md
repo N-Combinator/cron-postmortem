@@ -97,7 +97,7 @@ $ journalctl --since "24 hours ago" -o short-iso -u backup-db.service >> cron.lo
 | `0` | Nothing wrong and the scan was conclusive (or `--exit-zero`). |
 | `1` | At least one missed run, overlap or failure — or a warning that the scan could not check what it was asked to. |
 | `2` | Usage error: unreadable input, unwritable output, or arguments that leave nothing to scan. |
-| `3` | The log holds cron runs and not one of them could be attributed to a scheduled job, so the missed runs in the report are an artefact of the comparison rather than an outage. |
+| `3` | The log holds cron runs and not one of them could be attributed to a scheduled job, so the missed runs in the report are an artefact of the comparison rather than an outage. Only returned when those entries are the whole report — `1` wins if anything else was found. |
 
 ### Warnings
 
@@ -112,7 +112,7 @@ not for a warning that exits `2` or `3`.
 | `no-schedules` | Not one crontab entry or timer was found, so every detector had nothing to run against. | `1` |
 | `no-log-lines` | No log source was given, or nothing in it parsed as a cron/systemd log line — check the format and the syslog identifier. | `1` |
 | `unsupported-timezone` | An `OnCalendar=` value names a timezone (see the limitations); that timer is excluded from missed-run detection. | `1` |
-| `no-runs-matched` | The log is full of cron runs and not one of them belongs to a crontab entry — usually a misread crontab format or user (see below), or a log from another host. | `3` |
+| `no-runs-matched` | The log is full of cron runs and not one of them belongs to a crontab entry — usually a misread crontab format or user (see below), or a log from another host. | `3` / `1` |
 | `implausible-log-dates` | A year-less syslog source was dated across more than 300 days with fewer lines than that span has days — the inferred years are probably wrong. | `1` |
 | `empty-window` | The tolerance is longer than the window it applies to, so no scheduled run could be judged. | `2` / `1` |
 
@@ -140,6 +140,14 @@ schedules, at least one cron run observed, and not one pair between them — and
 the report. `--exit-zero` does not mute it, for the same reason it does not mute a usage
 error: the flag exists so a check does not page on findings, and these findings are not
 real. A log that only *partly* matches is the in-between case and stays a diagnostic.
+
+The warning disowns the crontab entries it could not reconcile, and nothing else, so
+`3` is only returned when those entries are the whole report. A failing timer, or a cron
+job whose runs *did* match, is a problem the crontab misreading cannot have invented;
+when the same scan finds one of those, the exit code is `1` — `1` wins wherever both
+apply — and the warning is still printed on stderr and listed in the report. With
+`--exit-zero` the findings are muted and `3` comes back, because the flag mutes findings
+and not the statement that the scan reconciled nothing.
 
 That is also why a user-format file passed to `--crontab` is
 attributed to `root` unless its name is a bare username: a collected crontab is usually

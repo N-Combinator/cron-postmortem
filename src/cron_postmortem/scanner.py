@@ -93,9 +93,29 @@ class ScanResult:
 
         The missed runs in such a report are an artefact of the comparison, not
         an outage, so the CLI gives it an exit code of its own (3) and does not
-        let ``--exit-zero`` mute it.
+        let ``--exit-zero`` mute it.  Only the entries that matched nothing are
+        disowned: see :attr:`standing_findings` for what still exits 1.
         """
         return any(warning.code == NO_RUNS_MATCHED for warning in self.warnings)
+
+    @property
+    def standing_findings(self) -> list[Finding]:
+        """The findings :attr:`no_runs_matched` does not disown.
+
+        That warning says one thing only: these cron entries were compared
+        against the log on a key the two sides do not share, so their missed
+        runs are an artefact.  It says nothing about a timer that failed or a
+        cron job whose runs *did* match - those problems are real, and a scan
+        that reports them has found an outage whatever else went wrong with it.
+        The exit code has to reflect that, or a systemd failure sitting next to
+        a misread crontab comes back as "scan problem, do not page".
+        """
+        artefacts = {
+            report.job.id
+            for report in self.job_reports
+            if report.job.source == CRON and not report.runs
+        }
+        return [finding for finding in self.findings if finding.job_id not in artefacts]
 
     @property
     def alerts(self) -> bool:
