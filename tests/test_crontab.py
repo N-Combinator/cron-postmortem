@@ -50,11 +50,96 @@ def test_origin_carries_the_line_number():
     assert jobs[0].origin == "/etc/crontab:5"
 
 
-def test_format_detection_follows_the_path():
-    assert crontab.is_system_format(Path("/etc/crontab"))
-    assert crontab.is_system_format(Path("/etc/cron.d/php"))
-    assert not crontab.is_system_format(Path("/var/spool/cron/crontabs/root"))
-    assert not crontab.is_system_format(Path("/home/alice/my-crontab"))
+def test_format_is_detected_from_the_content_not_the_path():
+    """The line shape decides, and the same text decides the same way anywhere."""
+    assert crontab.detect_format(SYSTEM).system_format
+    assert not crontab.detect_format(USER).system_format
+
+
+def test_the_user_column_is_recognised_by_what_follows_it():
+    def detected(line: str) -> str:
+        return crontab.detect_format(line + "\n").name
+
+    # Field 6 is a user name and field 7 opens a command of its own.
+    assert detected("*/5 * * * * root /usr/bin/x") == "system"
+    assert detected("17 * * * * www-data /usr/local/bin/rotate.sh") == "system"
+    assert detected("09,39 * * * * root [ -x /usr/lib/php/sessionclean ] && x") == "system"
+    assert detected("0 3 * * * backup flock -n /tmp/l /usr/bin/dump") == "system"
+    assert detected("@daily www-data /usr/local/bin/rotate.sh --keep 7") == "system"
+
+    # The command starts at field 6.
+    assert detected("*/5 * * * * /usr/bin/x") == "user"
+    assert detected("*/5 * * * * mysqlcheck --all-databases") == "user"
+    assert detected("*/5 * * * * poll.sh >/dev/null 2>&1") == "user"
+    assert detected("*/5 * * * * backup") == "user"
+    assert detected("0 3 * * * run-parts /etc/cron.hourly") == "user"
+    assert detected("@hourly /usr/local/bin/sync.sh") == "user"
+
+
+def test_a_file_that_says_nothing_either_way_is_read_as_a_user_crontab():
+    """Deterministic and documented: the tie goes to the per-user format.
+
+    ``backup archive`` is a stock account followed by a plausible script and a
+    plausible command followed by a plausible argument; nothing in the line can
+    tell them apart, so the file falls back to the format ``crontab -l`` emits.
+    """
+    detection = crontab.detect_format("*/5 * * * * backup archive\n")
+    assert (detection.system_format, detection.undecided) == (False, 1)
+    assert not detection.unanimous
+
+
+def test_the_majority_of_entries_decides_the_whole_file():
+    """cron applies one format per file, so one odd line cannot split it."""
+    mixed = (
+        "0 1 * * * root /usr/bin/a\n"
+        "0 2 * * * root /usr/bin/b\n"
+        "0 3 * * * /usr/bin/c\n"
+    )
+    detection = crontab.detect_format(mixed)
+    assert detection.system_format
+    assert (detection.system_votes, detection.user_votes) == (2, 1)
+    assert not detection.unanimous
+
+
+def test_a_file_whose_entries_disagree_says_so(tmp_path):
+    """One entry each way is a tie, so the file falls back to user format loudly."""
+    collected = tmp_path / "root"
+    collected.write_text("0 1 * * * root /usr/bin/a\n0 3 * * * /usr/bin/c\n")
+
+    _, problems = crontab.load_crontab_file(collected)
+
+    assert len(problems) == 1
+    assert "read as a user-format crontab" in problems[0]
+    assert "1 look system-format, 1 user-format" in problems[0]
+    assert "--crontab-format" in problems[0]
+
+
+def test_an_unambiguous_file_is_read_without_comment(tmp_path):
+    collected = tmp_path / "root"
+    collected.write_text("0 1 * * * root /usr/bin/a\n0 3 * * * root /usr/bin/b\n")
+
+    jobs, problems = crontab.load_crontab_file(collected)
+
+    assert [job.command for job in jobs] == ["/usr/bin/a", "/usr/bin/b"]
+    assert problems == []
+
+
+def test_lines_that_are_broken_in_either_format_do_not_vote():
+    """A truncated entry says nothing about the file it sits in."""
+    detection = crontab.detect_format("17 * * * *\n* * * *\n@daily\n")
+    assert detection.entries == 0
+    assert detection.unanimous
+
+
+def test_the_format_override_still_wins_over_the_content(tmp_path):
+    collected = tmp_path / "root"
+    collected.write_text("*/5 * * * * root /usr/bin/x\n")
+
+    jobs, problems = crontab.load_crontab_file(collected, format_override="user")
+
+    assert [(job.user, job.command) for job in jobs] == [("root", "root /usr/bin/x")]
+    # Forced by hand, so the scan does not second-guess the content.
+    assert problems == []
 
 
 def test_default_user_comes_from_the_filename():
@@ -112,6 +197,43 @@ def test_load_from_disk_autodetects(fixtures):
     assert problems == []
     assert [job.command for job in user] == ["/usr/local/bin/heartbeat.sh"]
     assert user[0].user == "root"
+
+
+def test_the_same_jobs_in_both_formats_come_out_the_same(tmp_path):
+    """Acceptance criterion 1, on the two files that used to need their paths.
+
+    The same three jobs are written once with a user column and once without,
+    and each file is given the *other* format's usual name.  Both must come out
+    as the same jobs, so nothing about the filename can be deciding.
+    """
+    system = tmp_path / "root"  # a spool name, holding a system crontab
+    system.write_text(
+        "0 3 * * * root /usr/local/bin/backup.sh\n"
+        "*/30 * * * * root /usr/local/bin/sync-metrics.sh\n"
+        "17 * * * * root /usr/local/bin/rotate-cache.sh\n"
+    )
+    per_user = tmp_path / "crontab"  # /etc/crontab's own name, holding a user crontab
+    per_user.write_text(
+        "0 3 * * * /usr/local/bin/backup.sh\n"
+        "*/30 * * * * /usr/local/bin/sync-metrics.sh\n"
+        "17 * * * * /usr/local/bin/rotate-cache.sh\n"
+    )
+
+    from_system, system_problems = crontab.load_crontab_file(system)
+    from_user, user_problems = crontab.load_crontab_file(per_user)
+
+    assert system_problems == []
+    # Neither file's format is in doubt; the one note is about the *owner* of
+    # the user-format file, whose name says nothing about who runs it.
+    assert len(user_problems) == 1
+    assert "attributed to 'root'" in user_problems[0]
+    assert "do not agree" not in user_problems[0]
+    assert [(job.user, job.command, job.schedule) for job in from_system] == [
+        ("root", "/usr/local/bin/backup.sh", "0 3 * * *"),
+        ("root", "/usr/local/bin/sync-metrics.sh", "*/30 * * * *"),
+        ("root", "/usr/local/bin/rotate-cache.sh", "17 * * * *"),
+    ]
+    assert [job.id for job in from_user] == [job.id for job in from_system]
 
 
 def test_unreadable_file_is_a_problem_not_a_crash(tmp_path):

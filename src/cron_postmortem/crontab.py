@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from .cronspec import MACROS, UNPREDICTABLE_MACROS
@@ -25,6 +26,27 @@ _COLLECTED_NAME_RE = re.compile(r"^[a-z_][a-z0-9_\-]*\$?$")
 _GENERIC_NAMES = frozenset({"cron", "crontab", "crontabs", "cronjobs", "jobs", "tab"})
 # run-parts drop-in files whose names cron itself ignores.
 _IGNORED_NAME_RE = re.compile(r"(\.(dpkg|rpm)[^.]*|~|\.bak|\.swp)$")
+
+# A command begins here rather than continuing the previous word.
+_COMMAND_PATH_RE = re.compile(r"^[/~]")
+# Words that look like a user name but are commands, and that no distribution
+# ships as an account: seeing one where the user column would be says the file
+# has no user column.  Names that are both a command and a stock account
+# (mysql, git, sync, mail, backup, list, man, news, lp) are deliberately absent
+# - they decide nothing, and the other entries in the file vote instead.
+_COMMAND_WORDS = frozenset({
+    "bash", "cd", "chronic", "curl", "docker", "echo", "env", "exec", "find",
+    "flock", "ionice", "logrotate", "make", "mysqldump", "nice", "node", "npm",
+    "perl", "pg_dump", "php", "printf", "psql", "python", "python2", "python3",
+    "rsync", "ruby", "run-parts", "sh", "sleep", "source", "sudo", "systemctl",
+    "tar", "test", "timeout", "umask", "wget", "xargs",
+})
+# A word in the command position that continues the previous word rather than
+# starting a command of its own.
+_SHELL_OPERATORS = frozenset({"&&", "||", "|", ";", "&", ">", ">>", "<", "2>&1"})
+
+SYSTEM_FORMAT = "system"
+USER_FORMAT = "user"
 
 
 def normalize_command(command: str) -> str:
@@ -59,12 +81,127 @@ def default_user_for(path: Path, *, trust_filename: bool = False) -> str:
     return name
 
 
-def is_system_format(path: Path) -> bool:
-    """``/etc/crontab`` and ``/etc/cron.d/*`` carry a user column; user crontabs do not."""
-    resolved = Path(os.path.normpath(str(path)))
-    if resolved.name == "crontab" and resolved.parent.name == "etc":
+@dataclass(frozen=True)
+class FormatDetection:
+    """How :func:`detect_format` read a crontab, and how sure it is.
+
+    The counts are kept so a caller can say *why* it chose a format; a file
+    whose entries disagree, or that says nothing either way, is worth a word in
+    the report because the choice decides every command the scan compares.
+    """
+
+    system_format: bool
+    system_votes: int = 0
+    user_votes: int = 0
+    undecided: int = 0
+
+    @property
+    def entries(self) -> int:
+        return self.system_votes + self.user_votes + self.undecided
+
+    @property
+    def unanimous(self) -> bool:
+        """Every entry that had an opinion agreed, and none abstained."""
+        return self.undecided == 0 and not (self.system_votes and self.user_votes)
+
+    @property
+    def name(self) -> str:
+        return SYSTEM_FORMAT if self.system_format else USER_FORMAT
+
+
+def detect_format(text: str) -> FormatDetection:
+    """Decide from the CONTENT whether a crontab carries a user column.
+
+    The path says nothing reliable.  ``/etc/crontab`` and ``/etc/cron.d/*`` do
+    carry a user column on a live host, but the files people actually hand this
+    tool are captures - ``web01.crontab``, ``crontab.txt``, ``etc-crontab`` -
+    and a system crontab read as a user crontab turns ``root /usr/bin/x`` into a
+    command no log line can ever say, so every occurrence comes back missed.
+    That is not a cosmetic slip: it is a wrong answer that looks like a finding.
+
+    So every entry votes on what sits in field 6 (field 2 after an ``@macro``),
+    and the majority decides for the whole file - cron applies one format to a
+    file, not one per line.  An entry votes *user* when field 6 cannot be a user
+    name, when nothing follows it, when it is a command no distribution ships as
+    an account, or when the word after it is an option or a shell operator and
+    so belongs to it.  It votes *system* when field 6 is a plausible user name
+    and what follows opens a command of its own - an absolute path, ``[``, or a
+    known command word - with ``root`` taken as a user name outright.
+
+    Entries that fit neither shape (``*/5 * * * * backup archive``, where
+    ``backup`` is both a stock account and a plausible script) abstain.  A tie,
+    including a file where every entry abstained, resolves to **user format**:
+    it is what ``crontab -l`` emits and what the spool holds, so it is the
+    format a collected crontab most often is.  The caller is told whenever the
+    entries were not unanimous, and ``--crontab-format`` settles it by hand.
+    """
+    system_votes = user_votes = undecided = 0
+    for line in _entry_lines(text):
+        rest = _fields_after_schedule(line)
+        if rest is None:
+            continue
+        vote = _vote(rest)
+        if vote is True:
+            system_votes += 1
+        elif vote is False:
+            user_votes += 1
+        else:
+            undecided += 1
+    return FormatDetection(
+        system_format=system_votes > user_votes,
+        system_votes=system_votes,
+        user_votes=user_votes,
+        undecided=undecided,
+    )
+
+
+def _entry_lines(text: str) -> list[str]:
+    """The lines of a crontab that schedule something, stripped of the rest."""
+    lines = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or _ENV_RE.match(line):
+            continue
+        lines.append(line)
+    return lines
+
+
+def _fields_after_schedule(line: str) -> list[str] | None:
+    """The fields following the schedule, or ``None`` if this is not an entry.
+
+    A line too short to carry a command in *either* format - a truncated
+    ``17 * * * *``, a bare ``@daily`` - is not an entry that could have been
+    read the wrong way, it is a broken line, and :func:`parse_crontab` reports
+    it as one.  Such a line is left out of the tally entirely rather than
+    counted as an abstention, so that a file of nothing but broken lines is not
+    also accused of being ambiguous about its format.
+    """
+    fields = line.split()
+    if line.startswith("@"):
+        rest = fields[1:]
+    elif len(fields) >= 5:
+        rest = fields[5:]
+    else:
+        return None
+    return rest or None
+
+
+def _vote(rest: list[str]) -> bool | None:
+    """``True`` for system format, ``False`` for user format, ``None`` to abstain."""
+    candidate_user, after = rest[0], rest[1] if len(rest) > 1 else None
+    if not _USERNAME_RE.match(candidate_user):
+        return False
+    if after is None or candidate_user in _COMMAND_WORDS:
+        return False
+    if after.startswith("-") or after in _SHELL_OPERATORS:
+        return False
+    if candidate_user == "root":
+        # No distribution ships a command called root, and root owns most of the
+        # entries anyone collects.
         return True
-    return "cron.d" in resolved.parts
+    if _COMMAND_PATH_RE.match(after) or after.startswith("[") or after in _COMMAND_WORDS:
+        return True
+    return None
 
 
 def parse_crontab(
@@ -159,12 +296,24 @@ def load_crontab_file(
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         return [], [f"{path}: cannot read ({exc.strerror or exc})"]
+    detection: FormatDetection | None = None
     if format_override == "auto":
-        system_format = is_system_format(path)
+        detection = detect_format(text)
+        system_format = detection.system_format
     else:
-        system_format = format_override == "system"
+        system_format = format_override == SYSTEM_FORMAT
     user = user_override or default_user_for(path, trust_filename=trust_filename)
     jobs, problems = parse_crontab(text, str(path), system_format, user)
+    if detection is not None and detection.entries and not detection.unanimous:
+        # The format decides where the command starts, so every comparison
+        # against the log hangs on it; a file whose entries disagree, or that
+        # says nothing either way, must not have the guess made silently.
+        problems.append(
+            f"{path}: read as a {detection.name}-format crontab, but its "
+            f"entries do not agree ({detection.system_votes} look system-format, "
+            f"{detection.user_votes} user-format, {detection.undecided} could be "
+            "either); pass --crontab-format if that is wrong"
+        )
     if jobs and not system_format and user_override is None and path.name != user:
         # Say which user the entries were attributed to whenever the filename
         # was not taken at face value: the whole match against the log hangs on
