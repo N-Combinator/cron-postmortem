@@ -250,6 +250,34 @@ def test_naming_the_user_settles_a_format_no_entry_backs_up(tmp_path):
     assert "--crontab-format system" in problems[0]
 
 
+def test_the_read_reports_the_format_it_applied_not_the_one_voted_for(tmp_path):
+    """The vote and the reading part company exactly here.
+
+    The entries voted system on repetition alone and ``--crontab-user`` overruled
+    them, so the file was read as user format while ``detection`` still says
+    system.  Anything that tells the caller which format to correct has to name
+    the applied one, or it names the format already in effect.
+    """
+    collected = tmp_path / "web01.crontab"
+    collected.write_text("0 3 * * * deploy /opt/a.sh\n0 4 * * * deploy /opt/b.sh\n")
+
+    read = crontab.load_crontab_file(collected, user_override="alice")
+
+    assert read.detection.system_format is True
+    assert (read.system_format, read.overruled_by_user) == (False, True)
+    assert (read.format, read.other_format) == ("user", "system")
+
+
+def test_a_read_that_was_not_overruled_reports_the_vote(tmp_path):
+    collected = tmp_path / "web01.crontab"
+    collected.write_text("0 3 * * * deploy /opt/a.sh\n0 4 * * * deploy /opt/b.sh\n")
+
+    read = crontab.load_crontab_file(collected)
+
+    assert (read.system_format, read.overruled_by_user) == (True, False)
+    assert (read.format, read.other_format) == ("system", "user")
+
+
 def test_naming_the_user_does_not_overrule_entries_that_name_an_account(tmp_path):
     """Here the file answers the question, and the answer that was not used is
     reported rather than silently dropped."""

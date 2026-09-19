@@ -986,3 +986,44 @@ def test_the_cli_prints_the_guessed_format_warning_and_exits_one(tmp_path, capsy
         "crontab-format-guessed"
     ]
     assert report["summary"]["warnings"] == 1
+
+
+def test_the_warning_names_the_format_the_entries_were_read_in(tmp_path):
+    """``--crontab-user`` overrules the vote, so the vote is not what to report.
+
+    These two entries read as system format on repetition alone and the option
+    overruled that, which is why every command still carries ``deploy`` in front
+    of it - the reading the missed runs come from.  The warning used to name the
+    vote instead: "read as a system-format crontab ... pass --crontab-format
+    user", which is the format already in effect, while the reading that cost the
+    scan its matches went unsaid.
+    """
+    overruled = tmp_path / "webjobs"
+    overruled.write_text(
+        "*/1 * * * * deploy /opt/app/tick\n*/2 * * * * deploy /opt/app/other\n"
+    )
+    matching = tmp_path / "root"
+    matching.write_text(MATCHING)
+    log = tmp_path / "syslog"
+    log.write_text(busy_cron_log("alice"))
+
+    result = scan(ScanOptions(
+        crontab_paths=[matching, overruled], log_paths=[log], now=NOW,
+        crontab_user="alice",
+        since=datetime(2026, 9, 18, 3, 0, 0),
+        until=datetime(2026, 9, 18, 4, 0, 0),
+    ))
+
+    assert codes(result) == ["crontab-format-guessed"]
+    message = result.warnings[0].message
+    assert "read as a user-format crontab because --crontab-user was given" in message
+    assert "--crontab-format system if it is wrong" in message
+    # The format that was applied, and the one that was not, are not swapped.
+    assert "read as a system-format crontab" not in message
+    assert "--crontab-format user" not in message
+    # ... and it is the reading the unmatched entries actually came from.
+    unmatched = [report for report in result.job_reports if not report.runs]
+    assert [report.job.command for report in unmatched] == [
+        "deploy /opt/app/tick", "deploy /opt/app/other"
+    ]
+

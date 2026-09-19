@@ -104,11 +104,30 @@ class CrontabRead:
     ``--crontab-format`` or the file was discovered where cron's own rule
     applies.  The scanner keeps it because a format nobody vouched for is the
     first suspect when the entries then match nothing in the log.
+
+    ``system_format`` is the format the entries were actually *read* in, which
+    is not always the one the vote reached: ``--crontab-user`` overrules a system
+    reading that rests on repetition alone, and then the vote says system while
+    the file was read as user format.  Anything that tells the caller which
+    format to correct has to name this one, or it sends them to the option
+    already in effect; ``overruled_by_user`` says why the two differ.
     """
 
     jobs: list[Job]
     problems: list[str]
     detection: FormatDetection | None = None
+    system_format: bool = False
+    overruled_by_user: bool = False
+
+    @property
+    def format(self) -> str:
+        """The name of the format the entries were read in."""
+        return SYSTEM_FORMAT if self.system_format else USER_FORMAT
+
+    @property
+    def other_format(self) -> str:
+        """The format to suggest when the one that was applied looks wrong."""
+        return USER_FORMAT if self.system_format else SYSTEM_FORMAT
 
 
 def normalize_command(command: str) -> str:
@@ -504,7 +523,7 @@ def load_crontab_file(
             f"entries attributed to {user!r} - pass --crontab-user if they "
             "belong to somebody else"
         )
-    return CrontabRead(jobs, problems, detection)
+    return CrontabRead(jobs, problems, detection, system_format, overruled_by_user)
 
 
 def discover_crontab_files() -> tuple[list[DiscoveredCrontab], list[str]]:

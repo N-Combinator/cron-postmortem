@@ -166,7 +166,10 @@ one of its entries matched a cron run in a log that is carrying them, the guess 
 likelier explanation than an outage, so it is said out loud on stderr and in the report
 rather than left as a diagnostic under the findings it invented. It exits `1`: there is
 a real report here, and part of it may be an artefact. A guess that matched its runs is
-not warned about — it was right, and the scan is clean.
+not warned about — it was right, and the scan is clean. The format it names is the one
+the entries were *read* in, which is not always the one the vote reached: where
+`--crontab-user` overruled a system reading, the warning says so and points at
+`--crontab-format system`, not at the user format already in effect.
 
 The summary line `Log lines read N, understood M` (`log_lines_total` /
 `log_lines_parsed` in JSON) is there for the in-between case: a log source that is only
