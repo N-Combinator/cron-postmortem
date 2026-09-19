@@ -37,6 +37,12 @@ UNMATCHED_EXAMPLES = 5
 # nothing in a log that does carry cron runs; see _guessed_format_warnings.
 CRONTAB_FORMAT_GUESSED = "crontab-format-guessed"
 
+# What a scan that reconciled nothing has found, said the same way whether the
+# missed runs it stands to invent are in the report or not.
+NOTHING_MATCHED = (
+    "not one cron run in the log could be attributed to a crontab entry"
+)
+
 
 @dataclass
 class ScanOptions:
@@ -98,7 +104,9 @@ class ScanResult:
         The missed runs in such a report are an artefact of the comparison, not
         an outage, so the CLI gives it an exit code of its own (3) and does not
         let ``--exit-zero`` mute it.  Only the entries that matched nothing are
-        disowned: see :attr:`standing_findings` for what still exits 1.
+        disowned: see :attr:`standing_findings` for what still exits 1, and
+        :func:`_comparison_warnings` for why a scan with no such runs in it -
+        a window nothing was due in - is not warned about at all.
         """
         return any(warning.code == NO_RUNS_MATCHED for warning in self.warnings)
 
@@ -216,18 +224,15 @@ def scan(options: ScanOptions) -> ScanResult:
     if empty_window is not None:
         warnings.append(empty_window)
 
-    cron_runs_by_job = _match_cron_runs(
-        jobs, scan_data, diagnostics, warnings, options.crontab_user
+    cron_runs_by_job, nothing_matched = _match_cron_runs(
+        jobs, scan_data, diagnostics, options.crontab_user
     )
-    if scan_data.cron_runs and not any(
-        warning.code == NO_RUNS_MATCHED for warning in warnings
-    ):
-        # The all-or-nothing case is already the loudest thing this tool says;
-        # this is the same mistake in one crontab out of several, which used to
-        # leave nothing but a diagnostic under the missed runs it invented.
-        warnings.extend(
-            _guessed_format_warnings(jobs, guessed_formats, cron_runs_by_job)
-        )
+    # Both comparison warnings are claims about missed runs the comparison
+    # invented, so neither can be decided before the report says whether there
+    # are any; they are settled after the job loop and spliced in here, where a
+    # statement about the whole scan belongs - ahead of the per-job warnings.
+    comparison_warnings_at = len(warnings)
+
     events_by_unit: dict[str, list] = {}
     for event in scan_data.unit_events:
         events_by_unit.setdefault(event.unit, []).append(event)
@@ -250,6 +255,14 @@ def scan(options: ScanOptions) -> ScanResult:
         )
         job_reports.append(report)
         findings.extend(report.findings)
+
+    warnings[comparison_warnings_at:comparison_warnings_at] = _comparison_warnings(
+        job_reports=job_reports,
+        nothing_matched=nothing_matched,
+        guessed_formats=guessed_formats,
+        has_cron_runs=bool(scan_data.cron_runs),
+        diagnostics=diagnostics,
+    )
 
     findings.sort(key=lambda item: (item.when or window_start, item.kind, item.job_id))
     return ScanResult(
@@ -595,10 +608,15 @@ def _match_cron_runs(
     jobs: list[Job],
     scan_data: LogScan,
     diagnostics: list[Diagnostic],
-    warnings: list[ScanWarning],
     crontab_user: str | None = None,
-) -> dict[str, list[Run]]:
-    """Attach observed ``CMD`` lines to the crontab entry that produced them."""
+) -> tuple[dict[str, list[Run]], str | None]:
+    """Attach observed ``CMD`` lines to the crontab entry that produced them.
+
+    Returns the runs per job and, where not one pair could be made, the message
+    describing why.  Whether that message is a warning or a diagnostic depends
+    on what the comparison went on to invent, which is not known here: see
+    :func:`_comparison_warnings`.
+    """
     by_key: dict[tuple[str, str], Job] = {}
     for job in jobs:
         if job.source != CRON or job.command is None:
@@ -641,21 +659,80 @@ def _match_cron_runs(
     # more a verdict on the jobs than the one an unmatched user column invents.
     # A log nothing at all was understood from is already its own warning, so it
     # is left to say so rather than being charged twice.
+    nothing_matched = None
     if by_key and not runs and scan_data.lines_parsed:
-        warnings.append(
-            _nothing_matched_warning(by_key, scan_data, summary, crontab_user)
+        nothing_matched = _nothing_matched_message(
+            by_key, scan_data, summary, crontab_user
         )
     elif summary:
         diagnostics.append(Diagnostic(None, summary))
-    return runs
+    return runs, nothing_matched
 
 
-def _nothing_matched_warning(
+def _comparison_warnings(
+    job_reports: list[JobReport],
+    nothing_matched: str | None,
+    guessed_formats: dict[str, crontab_mod.CrontabRead],
+    has_cron_runs: bool,
+    diagnostics: list[Diagnostic],
+) -> list[ScanWarning]:
+    """Decide the warnings that are about missed runs the comparison invented.
+
+    Both ``no-runs-matched`` and ``crontab-format-guessed`` say the same kind of
+    thing - *these missed runs are an artefact of how the two sides were lined
+    up, not an outage* - and neither is true of a report that has no missed runs
+    in it.  A scan whose window holds no occurrence of any entry (a narrow
+    incident window, a monthly job looked at over an afternoon, a crontab of
+    nothing but ``@reboot``) reconciles nothing and invents nothing, and telling
+    its caller that every scheduled run counts as missed, over a report saying
+    ``missed: 0``, is a page for a healthy host.  So the comparison is only
+    disowned once it has something to disown: at least one cron entry with no
+    matched run *and* a missed run reported in its place.
+
+    What went unreconciled is still worth saying, so where there is nothing to
+    disown the same sentence is kept as a diagnostic, which does not move the
+    exit code.
+    """
+    warnings: list[ScanWarning] = []
+    invented = {
+        report.job.id
+        for report in job_reports
+        if report.job.source == CRON
+        and not report.runs
+        and any(finding.kind == MISSED for finding in report.findings)
+    }
+    if nothing_matched is not None:
+        if invented:
+            warnings.append(
+                ScanWarning(
+                    NO_RUNS_MATCHED,
+                    f"{NOTHING_MATCHED}, so every scheduled cron run counts as "
+                    f"missed: {nothing_matched}",
+                )
+            )
+        else:
+            diagnostics.append(
+                Diagnostic(
+                    None,
+                    f"{NOTHING_MATCHED}, but no missed run was reported for "
+                    "the entries that went unreconciled, so no finding in this "
+                    f"report rests on it: {nothing_matched}",
+                )
+            )
+    elif has_cron_runs:
+        # The all-or-nothing case is already the loudest thing this tool says;
+        # this is the same mistake in one crontab out of several, which used to
+        # leave nothing but a diagnostic under the missed runs it invented.
+        warnings.extend(_guessed_format_warnings(job_reports, guessed_formats, invented))
+    return warnings
+
+
+def _nothing_matched_message(
     by_key: dict[tuple[str, str], Job],
     scan_data: LogScan,
     summary: str,
     crontab_user: str | None = None,
-) -> ScanWarning:
+) -> str:
     """Crontab entries, cron runs in the log, and not one pair between them.
 
     Some entries never firing is a finding about those jobs; *every* entry
@@ -664,7 +741,9 @@ def _nothing_matched_warning(
     not use - most often the user a ``--crontab`` file was attributed to, which
     the log carries but the file does not.  Left as a diagnostic it does not
     move the exit code and is easy to lose under the missed runs it invents, so
-    it is a warning: the report is not a verdict on these jobs.
+    where it invents any it is a warning: the report is not a verdict on these
+    jobs.  This builds the half of the sentence that holds either way; the
+    opener and the verdict are :func:`_comparison_warnings`'.
 
     A log that was understood but carries no cron run *at all* is the same claim
     with one side missing - ``summary`` is empty there, because nothing went
@@ -717,17 +796,13 @@ def _nothing_matched_warning(
             "command - pass --crontab-format) and that the crontab and the log "
             "come from the same host and the same point in time"
         )
-    message = (
-        "not one cron run in the log could be attributed to a crontab entry, "
-        f"so every scheduled cron run counts as missed: {cause}."
-    )
-    return ScanWarning(NO_RUNS_MATCHED, f"{message} {summary}" if summary else message)
+    return f"{cause}. {summary}" if summary else f"{cause}."
 
 
 def _guessed_format_warnings(
-    jobs: list[Job],
+    job_reports: list[JobReport],
     guessed_formats: dict[str, crontab_mod.CrontabRead],
-    cron_runs_by_job: dict[str, list[Run]],
+    invented: set[str],
 ) -> list[ScanWarning]:
     """A crontab whose format was guessed, and whose entries then matched nothing.
 
@@ -749,11 +824,22 @@ def _guessed_format_warnings(
     ``--crontab-user`` overruled a system reading, naming the vote would tell the
     caller to correct the file to the format it is already being read in and
     leave the one that actually produced the missed runs unsaid.
+
+    ``invented`` is the entries a missed run *was* reported for; a file none of
+    whose entries is in it has no missed runs to blame on the guess, so it is
+    left alone - the warning's whole subject is those runs.
     """
     warnings: list[ScanWarning] = []
+    matched = {report.job.id for report in job_reports if report.runs}
     for path, read in guessed_formats.items():
-        entries = [job for job in jobs if job.source == CRON and path in _origins(job)]
-        if not entries or any(cron_runs_by_job.get(job.id) for job in entries):
+        entries = [
+            report.job
+            for report in job_reports
+            if report.job.source == CRON and path in _origins(report.job)
+        ]
+        if not entries or any(job.id in matched for job in entries):
+            continue
+        if not any(job.id in invented for job in entries):
             continue
         if read.overruled_by_user:
             reading = (

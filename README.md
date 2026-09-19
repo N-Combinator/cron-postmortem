@@ -112,8 +112,8 @@ not for a warning that exits `2` or `3`.
 | `no-schedules` | Not one crontab entry or timer was found, so every detector had nothing to run against. | `1` |
 | `no-log-lines` | No log source was given, or nothing in it parsed as a cron/systemd log line — check the format and the syslog identifier. | `1` |
 | `unsupported-timezone` | An `OnCalendar=` value names a timezone (see the limitations); that timer is excluded from missed-run detection. | `1` |
-| `no-runs-matched` | Crontab entries were checked against an understood log and not one run was attributed to any of them — the log's cron runs all belong to something else, or it carries no cron line at all. | `3` / `1` |
-| `crontab-format-guessed` | One crontab whose format the entries did not settle between them matched none of the log's cron runs, while the rest of the scan did match — the missed runs reported for it may be an artefact of the reading. | `1` |
+| `no-runs-matched` | Crontab entries were checked against an understood log, not one run was attributed to any of them, and missed runs were reported in their place — the log's cron runs all belong to something else, or it carries no cron line at all. | `3` / `1` |
+| `crontab-format-guessed` | One crontab whose format the entries did not settle between them matched none of the log's cron runs and came back with missed runs, while the rest of the scan did match — those missed runs may be an artefact of the reading. | `1` |
 | `implausible-log-dates` | A year-less syslog source was dated across more than 300 days with fewer lines than that span has days — the inferred years are probably wrong. | `1` |
 | `empty-window` | The tolerance is longer than the window it applies to, so no scheduled run could be judged. | `2` / `1` |
 
@@ -136,13 +136,21 @@ occurrences comes back as a missed run. A report like that is not a quieter vers
 an outage, it is a different claim: *some* entries never firing is a finding about those
 jobs, but *every* entry missing while the log was understood is a statement about the
 scan. The warning is raised on exactly that shape — at least one cron job among the
-schedules, a log at least one line of which was understood, and not one run attributed
-to any entry — and it exits `3` so a monitoring check can tell it from the `1` a real
-outage returns without parsing the report. The log does not have to carry cron runs of
+schedules, a log at least one line of which was understood, not one run attributed to
+any entry, and at least one missed run reported in their place — and it exits `3` so a
+monitoring check can tell it from the `1` a real outage returns without parsing the
+report. The log does not have to carry cron runs of
 its own for this: a log with no `CMD` line in it at all (the wrong file, or a journal
 filtered by unit rather than by cron's identifier) reports the same full page of missed
 runs, and that is the commonest way to get zero matches. A log nothing at all was
 understood from is `no-log-lines` instead — the same scan, said once.
+
+That last condition is what keeps a healthy scan quiet. Zero matches is only a broken
+comparison if the comparison invented something: a window in which nothing was due —
+a narrow incident window, a monthly job looked at over an afternoon, a crontab of
+nothing but `@reboot` — matches nothing because there was nothing to match, and its
+report says `missed: 0`. There is nothing there to disown, so the scan exits `0` and
+what went unreconciled is recorded as a diagnostic instead.
 
 `--exit-zero` does not mute it, for the same reason it does not mute a usage
 error: the flag exists so a check does not page on findings, and these findings are not
@@ -168,8 +176,8 @@ crontab of several is misread the scan still matches the others, so the all-or-n
 test never fires and the misread file's entries come back as an ordinary-looking page of
 missed runs. When the format of that file had to be *guessed* — its entries did not
 settle it between them, or its user column was believed on repetition alone — and not
-one of its entries matched a cron run in a log that is carrying them, the guess is a
-likelier explanation than an outage, so it is said out loud on stderr and in the report
+one of its entries matched a cron run in a log that is carrying them while missed runs
+were reported for it, the guess is a likelier explanation than an outage, so it is said out loud on stderr and in the report
 rather than left as a diagnostic under the findings it invented. It exits `1`: there is
 a real report here, and part of it may be an artefact. A guess that matched its runs is
 not warned about — it was right, and the scan is clean. The format it names is the one

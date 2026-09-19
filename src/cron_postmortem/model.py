@@ -121,10 +121,12 @@ class ScanWarning:
 
     :data:`NO_RUNS_MATCHED` gets an exit code of its own (3) for the same
     reason in reverse: the scan did run, and produced a full page of missed
-    runs that are not real.  A monitoring check that cannot tell that page from
-    a genuine outage acts on fiction, so it must be able to tell them apart
-    from the exit code alone.  It disowns those entries and nothing else, so a
-    scan that also found a real problem still exits 1; see
+    runs that are not real.  It is those runs the warning is about, so a scan
+    that reconciled nothing and reported none of them stays quiet.  A
+    monitoring check that cannot tell that page from a genuine outage acts on
+    fiction, so it must be able to tell them apart from the exit code alone.
+    It disowns those entries and nothing else, so a scan that also found a real
+    problem still exits 1; see
     ``ScanResult.standing_findings``.
     """
 
