@@ -156,7 +156,7 @@ def test_the_same_word_in_field_6_of_two_entries_is_a_user_column():
     )
 
     assert detection.system_format
-    assert (detection.system_votes, detection.repeated_name) == (2, "deploy")
+    assert (detection.system_votes, detection.repeated_names) == (2, ("deploy",))
     # Believed, but by the file rather than by any entry: still worth saying.
     assert detection.rests_on_repetition
 
@@ -194,6 +194,37 @@ def test_a_user_column_taken_on_repetition_alone_says_so(tmp_path):
     assert len(problems) == 1
     assert "'deploy' sits in the user column" in problems[0]
     assert "not a name this tool knows as an account" in problems[0]
+
+
+def test_two_repeated_words_are_both_named_in_the_note(tmp_path):
+    """The count has to belong to the words it is put against.
+
+    Four entries, two names, and the note used to read "'aa' sits in the user
+    column of 4 entries" - a tally for a word that carries half of it.
+    """
+    collected = tmp_path / "web01.crontab"
+    collected.write_text(
+        "0 1 * * * aa /x\n0 2 * * * aa /y\n0 3 * * * bb /p\n0 4 * * * bb /q\n"
+    )
+
+    read = crontab.load_crontab_file(collected)
+
+    assert read.detection.repeated_names == ("aa", "bb")
+    assert read.detection.repeated_votes == 4
+    assert "'aa', 'bb' sit in the user column of 4 entries" in read.problems[0]
+
+
+def test_a_name_that_is_also_a_shipped_command_does_not_settle_the_format():
+    """``http`` is Arch's web server account and HTTPie, ``ftp`` both too.
+
+    A stock account only settles a file when no distribution ships a command by
+    that name; these two do, so ``*/5 * * * * http https://example.com/ping``
+    was read as a system entry - unanimously, with nothing said about it.
+    """
+    for line in ("*/5 * * * * http https://example.com/ping",
+                 "0 3 * * * ftp ftp.example.com"):
+        detection = crontab.detect_format(line + "\n")
+        assert (detection.name, detection.system_votes) == ("user", 0)
 
 
 def test_naming_the_user_settles_a_format_no_entry_backs_up(tmp_path):

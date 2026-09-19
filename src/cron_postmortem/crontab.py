@@ -51,12 +51,13 @@ _COMMAND_WORDS = frozenset({
 _SHELL_OPERATORS = frozenset({"&&", "||", "|", ";", "&", ">", ">>", "<", "2>&1"})
 # Accounts a distribution creates that are not also commands.  A name from this
 # list in field 6 settles the format on its own; a name that is both an account
-# and a plausible command (backup, mysql, git, sync, mail, list, man, news, lp)
-# is deliberately absent, because on those the word decides nothing.
+# and a command (backup, mysql, git, sync, mail, list, man, news, lp, and the
+# two that are both a stock account and a shipped client, http for HTTPie and
+# ftp) is deliberately absent, because on those the word decides nothing.
 _SYSTEM_ACCOUNTS = frozenset({
-    "root", "daemon", "bin", "sys", "adm", "nobody", "www-data", "http",
+    "root", "daemon", "bin", "sys", "adm", "nobody", "www-data",
     "apache", "httpd", "nginx", "postgres", "postfix", "syslog", "messagebus",
-    "uucp", "proxy", "gnats", "irc", "sshd", "ftp", "tomcat", "jenkins",
+    "uucp", "proxy", "gnats", "irc", "sshd", "tomcat", "jenkins",
     "munin", "nagios", "zabbix", "prometheus", "grafana", "redis", "mongodb",
     "rabbitmq", "elasticsearch", "influxdb", "oracle", "ubuntu", "ec2-user",
     "systemd-timesync",
@@ -156,7 +157,7 @@ class FormatDetection:
     user_votes: int = 0
     undecided: int = 0
     repeated_votes: int = 0
-    repeated_name: str | None = None
+    repeated_names: tuple[str, ...] = ()
 
     @property
     def entries(self) -> int:
@@ -244,32 +245,42 @@ def detect_format(text: str) -> FormatDetection:
     system_votes = votes.count(_SYSTEM_VOTE)
     user_votes = votes.count(_USER_VOTE)
     undecided = votes.count(_ABSTAIN)
-    believed, name = _corroborated(repeatable, named_an_account=system_votes > 0)
+    believed, names = _corroborated(repeatable, named_an_account=system_votes > 0)
     return FormatDetection(
         system_format=system_votes + believed > user_votes,
         system_votes=system_votes + believed,
         user_votes=user_votes,
         undecided=undecided + len(repeatable) - believed,
         repeated_votes=believed,
-        repeated_name=name,
+        repeated_names=names,
     )
 
 
 def _corroborated(
     candidates: list[str], *, named_an_account: bool
-) -> tuple[int, str | None]:
-    """How many "could be a user column" entries the rest of the file backs up."""
+) -> tuple[int, tuple[str, ...]]:
+    """How many "could be a user column" entries the rest of the file backs up.
+
+    Every repeated name counts, and every repeated name is returned: a file with
+    ``aa`` in two entries and ``bb`` in two more has four entries whose first
+    word repeats, and saying so under one of the two names would put a count
+    against a word that does not carry it.
+    """
     if not candidates:
-        return 0, None
+        return 0, ()
     if named_an_account:
         # Another entry names an account outright, so the file has a user column
         # and these entries are filling it.
-        return len(candidates), None
+        return len(candidates), ()
     counts = Counter(candidates)
-    name, count = counts.most_common(1)[0]
-    if count < 2:
-        return 0, None
-    return sum(n for n in counts.values() if n > 1), name
+    repeated = sorted(name for name, count in counts.items() if count > 1)
+    if not repeated:
+        return 0, ()
+    return sum(counts[name] for name in repeated), tuple(repeated)
+
+
+def _quoted(names: tuple[str, ...]) -> str:
+    return ", ".join(repr(name) for name in names)
 
 
 def _entry_lines(text: str) -> list[str]:
@@ -454,16 +465,19 @@ def load_crontab_file(
             problems.append(
                 f"{path}: read as a user-format crontab because --crontab-user "
                 f"was given; its entries would otherwise have been read as "
-                f"system-format with {detection.repeated_name!r} as the user "
-                "column - pass --crontab-format system if that is what it is"
+                f"system-format with {_quoted(detection.repeated_names)} as the "
+                "user column - pass --crontab-format system if that is what it is"
             )
         elif detection.rests_on_repetition:
+            one = len(detection.repeated_names) == 1
             problems.append(
                 f"{path}: read as a system-format crontab because "
-                f"{detection.repeated_name!r} sits in the user column of "
-                f"{detection.repeated_votes} entries, but it is not a name this "
-                "tool knows as an account; pass --crontab-format user if it is a "
-                "command"
+                f"{_quoted(detection.repeated_names)} "
+                f"{'sits' if one else 'sit'} in the user column of "
+                f"{detection.repeated_votes} entries, but "
+                f"{'it is not a name' if one else 'those are not names'} this "
+                "tool knows as an account; pass --crontab-format user if the "
+                "file has no user column"
             )
         elif not detection.unanimous:
             problems.append(
