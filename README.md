@@ -16,10 +16,10 @@ finds something, so it drops straight into a monitoring check.
 It also refuses to report success when it checked nothing. A scan that found no
 schedules, or that understood not one line of the log it was given, prints a
 **warning** and exits non-zero: "no problems" and "nothing was looked at" have to be
-different answers to a monitoring check. And when the log is full of cron runs but not
-one of them can be attributed to a scheduled job, the report is a page of missed runs
-that never happened, so that gets a **warning and an exit code of its own** (`3`)
-rather than the `1` a real outage returns.
+different answers to a monitoring check. And when a log it did understand yields not one
+run that can be attributed to a scheduled job, the report is a page of missed runs that
+never happened, so that gets a **warning and an exit code of its own** (`3`) rather than
+the `1` a real outage returns.
 
 Zero runtime dependencies, Python 3.10+, Linux.
 
@@ -97,7 +97,7 @@ $ journalctl --since "24 hours ago" -o short-iso -u backup-db.service >> cron.lo
 | `0` | Nothing wrong and the scan was conclusive (or `--exit-zero`). |
 | `1` | At least one missed run, overlap or failure — or a warning that the scan could not check what it was asked to. |
 | `2` | Usage error: unreadable input, unwritable output, or arguments that leave nothing to scan. |
-| `3` | The log holds cron runs and not one of them could be attributed to a scheduled job, so the missed runs in the report are an artefact of the comparison rather than an outage. Only returned when those entries are the whole report — `1` wins if anything else was found. |
+| `3` | The log was understood and not one run in it could be attributed to a scheduled job, so the missed runs in the report are an artefact of the comparison rather than an outage. Only returned when those entries are the whole report — `1` wins if anything else was found. |
 
 ### Warnings
 
@@ -112,7 +112,7 @@ not for a warning that exits `2` or `3`.
 | `no-schedules` | Not one crontab entry or timer was found, so every detector had nothing to run against. | `1` |
 | `no-log-lines` | No log source was given, or nothing in it parsed as a cron/systemd log line — check the format and the syslog identifier. | `1` |
 | `unsupported-timezone` | An `OnCalendar=` value names a timezone (see the limitations); that timer is excluded from missed-run detection. | `1` |
-| `no-runs-matched` | The log is full of cron runs and not one of them belongs to a crontab entry — usually a misread crontab format or user (see below), or a log from another host. | `3` / `1` |
+| `no-runs-matched` | Crontab entries were checked against an understood log and not one run was attributed to any of them — the log's cron runs all belong to something else, or it carries no cron line at all. | `3` / `1` |
 | `crontab-format-guessed` | One crontab whose format the entries did not settle between them matched none of the log's cron runs, while the rest of the scan did match — the missed runs reported for it may be an artefact of the reading. | `1` |
 | `implausible-log-dates` | A year-less syslog source was dated across more than 300 days with fewer lines than that span has days — the inferred years are probably wrong. | `1` |
 | `empty-window` | The tolerance is longer than the window it applies to, so no scheduled run could be judged. | `2` / `1` |
@@ -134,11 +134,17 @@ carries nothing else — so an entry read as belonging to the wrong user, or wit
 column left glued to the front of its command, can never match, and every one of its
 occurrences comes back as a missed run. A report like that is not a quieter version of
 an outage, it is a different claim: *some* entries never firing is a finding about those
-jobs, but every entry missing while the log is full of cron runs is a statement about
-the scan. The warning is raised on exactly that shape — at least one cron job among the
-schedules, at least one cron run observed, and not one pair between them — and it exits
-`3` so a monitoring check can tell it from the `1` a real outage returns without parsing
-the report. `--exit-zero` does not mute it, for the same reason it does not mute a usage
+jobs, but *every* entry missing while the log was understood is a statement about the
+scan. The warning is raised on exactly that shape — at least one cron job among the
+schedules, a log at least one line of which was understood, and not one run attributed
+to any entry — and it exits `3` so a monitoring check can tell it from the `1` a real
+outage returns without parsing the report. The log does not have to carry cron runs of
+its own for this: a log with no `CMD` line in it at all (the wrong file, or a journal
+filtered by unit rather than by cron's identifier) reports the same full page of missed
+runs, and that is the commonest way to get zero matches. A log nothing at all was
+understood from is `no-log-lines` instead — the same scan, said once.
+
+`--exit-zero` does not mute it, for the same reason it does not mute a usage
 error: the flag exists so a check does not page on findings, and these findings are not
 real. A log that only *partly* matches is the in-between case and stays a diagnostic.
 

@@ -623,6 +623,7 @@ def _match_cron_runs(
                 pid=observed.pid,
             )
         )
+    summary = ""
     if unmatched:
         unique = sorted(set(unmatched))
         examples = ", ".join(unique[:UNMATCHED_EXAMPLES]) + (
@@ -632,12 +633,20 @@ def _match_cron_runs(
             f"{len(unmatched)} cron run(s) in the log matched no known crontab "
             f"entry ({len(unique)} distinct): {examples}"
         )
-        if by_key and not runs:
-            warnings.append(
-                _nothing_matched_warning(by_key, scan_data, summary, crontab_user)
-            )
-        else:
-            diagnostics.append(Diagnostic(None, summary))
+    # Entries on one side, an understood log on the other, and not one pair
+    # between them.  The log needing no cron run of its own for this is the
+    # point: a log whose cron lines were never collected (a journal filtered by
+    # unit, or asked for an identifier cron does not use on this host) reports
+    # every occurrence of every entry missed just the same, and that page is no
+    # more a verdict on the jobs than the one an unmatched user column invents.
+    # A log nothing at all was understood from is already its own warning, so it
+    # is left to say so rather than being charged twice.
+    if by_key and not runs and scan_data.lines_parsed:
+        warnings.append(
+            _nothing_matched_warning(by_key, scan_data, summary, crontab_user)
+        )
+    elif summary:
+        diagnostics.append(Diagnostic(None, summary))
     return runs
 
 
@@ -656,10 +665,28 @@ def _nothing_matched_warning(
     the log carries but the file does not.  Left as a diagnostic it does not
     move the exit code and is easy to lose under the missed runs it invents, so
     it is a warning: the report is not a verdict on these jobs.
+
+    A log that was understood but carries no cron run *at all* is the same claim
+    with one side missing - ``summary`` is empty there, because nothing went
+    unmatched; there was nothing to match.  It is the commoner shape of the two:
+    the log cron writes to was not the one collected, or the journal was asked
+    for units and the cron lines were left out of it.  The report is the same
+    full page of invented missed runs, so it is said the same way.
     """
     observed_users = sorted({observed.user for observed in scan_data.cron_runs})
     known_users = sorted({user for user, _ in by_key})
-    if set(observed_users).isdisjoint(known_users):
+    if not scan_data.cron_runs:
+        entries = len(by_key)
+        cause = (
+            f"{scan_data.lines_parsed} log line(s) were understood but not one of "
+            f"them is a cron run, so the {entries} crontab "
+            f"{'entry' if entries == 1 else 'entries'} had nothing to be compared "
+            "against; check that the log is the one cron writes to and that it "
+            "covers the window, and that a journal query asked for cron's own "
+            f"identifier ({', '.join(journal_cron_identifiers())}) instead of "
+            "filtering by unit"
+        )
+    elif set(observed_users).isdisjoint(known_users):
         if crontab_user is not None:
             # Telling somebody to pass the option they passed is how a report
             # gets closed as noise.  They named a user and the entries are not
@@ -690,16 +717,16 @@ def _nothing_matched_warning(
             "command - pass --crontab-format) and that the crontab and the log "
             "come from the same host and the same point in time"
         )
-    return ScanWarning(
-        NO_RUNS_MATCHED,
-        f"not one cron run in the log could be attributed to a crontab entry, "
-        f"so every scheduled cron run counts as missed: {cause}. {summary}",
+    message = (
+        "not one cron run in the log could be attributed to a crontab entry, "
+        f"so every scheduled cron run counts as missed: {cause}."
     )
+    return ScanWarning(NO_RUNS_MATCHED, f"{message} {summary}" if summary else message)
 
 
 def _guessed_format_warnings(
     jobs: list[Job],
-    guessed_formats: dict[str, crontab_mod.FormatDetection],
+    guessed_formats: dict[str, crontab_mod.CrontabRead],
     cron_runs_by_job: dict[str, list[Run]],
 ) -> list[ScanWarning]:
     """A crontab whose format was guessed, and whose entries then matched nothing.

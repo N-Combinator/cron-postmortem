@@ -1027,3 +1027,106 @@ def test_the_warning_names_the_format_the_entries_were_read_in(tmp_path):
         "deploy /opt/app/tick", "deploy /opt/app/other"
     ]
 
+# --- a log with no cron lines at all is the same broken comparison --------------
+
+# A journal collected with "journalctl -u backup.service": every line parses, and
+# cron's own lines were never in it.  Nothing goes unmatched, because nothing is
+# there to match - and every occurrence of every crontab entry comes back missed.
+UNIT_ONLY_JOURNAL = (
+    "2026-09-18T03:00:01+0200 h systemd[1]: Starting backup.service - Nightly backup...\n"
+    "2026-09-18T03:10:09+0200 h systemd[1]: Finished backup.service - Nightly backup.\n"
+    "2026-09-18T03:50:09+0200 h systemd[1]: Finished backup.service - Nightly backup.\n"
+)
+
+
+def _no_cron_lines(tmp_path) -> tuple[Path, Path]:
+    crontab = tmp_path / "root"
+    crontab.write_text("*/10 * * * * /usr/local/bin/poll.sh\n")
+    log = tmp_path / "journal.log"
+    log.write_text(UNIT_ONLY_JOURNAL)
+    return crontab, log
+
+
+def test_a_log_without_one_cron_line_is_the_same_warning(tmp_path):
+    """Acceptance criterion 2 without a single cron run to point at.
+
+    The warning used to hang on the unmatched runs, so a log that carries no
+    ``CMD`` line at all - the shape a unit-filtered journal or the wrong log file
+    has, and the likeliest way to get zero matches - produced the full page of
+    invented missed runs with nothing said about it.
+    """
+    crontab_file, log = _no_cron_lines(tmp_path)
+
+    result = scan(ScanOptions(
+        crontab_paths=[crontab_file], log_paths=[log], now=NOW,
+        since=datetime(2026, 9, 18, 3, 0, 0),
+        until=datetime(2026, 9, 18, 4, 0, 0),
+    ))
+
+    assert codes(result) == ["no-runs-matched"]
+    assert result.alerts is True
+    assert result.usage_error is False
+    # The findings are there, and all of them are disowned by the warning.
+    assert result.problems > 0
+    assert result.standing_findings == []
+    message = result.warnings[0].message
+    assert "3 log line(s) were understood but not one of them is a cron run" in message
+    assert "1 crontab entry had nothing to be compared against" in message
+    # Nothing was unmatched, so the sentence about unmatched runs is left off.
+    assert "matched no known crontab entry" not in message
+    assert message.endswith("filtering by unit.")
+
+
+def test_the_cli_exits_three_on_a_log_with_no_cron_lines(tmp_path, capsys):
+    crontab_file, log = _no_cron_lines(tmp_path)
+
+    code = cli.main([
+        "scan", "--crontab", str(crontab_file), "--log-file", str(log),
+        "--now", NOW_ARG,
+        "--since", "2026-09-18T03:00:00", "--until", "2026-09-18T04:00:00",
+        "--format", "json",
+    ])
+
+    captured = capsys.readouterr()
+    assert code == cli.EXIT_NO_MATCH
+    assert "cron-postmortem: no-runs-matched:" in captured.err
+    report = json.loads(captured.out)
+    assert [warning["code"] for warning in report["warnings"]] == ["no-runs-matched"]
+    assert report["summary"]["runs"] == 0
+    assert report["summary"]["missed"] > 0
+
+
+def test_a_log_with_no_cron_lines_and_no_cron_entries_says_nothing(tmp_path):
+    """Only timers were scanned, so there was no cron comparison to break."""
+    show = tmp_path / "show.txt"
+    show.write_text(TIMER_SLACK_SHOW)
+    log = tmp_path / "journal.log"
+    log.write_text(UNIT_ONLY_JOURNAL)
+
+    result = scan(ScanOptions(
+        show_paths=[show], log_paths=[log], now=NOW,
+        since=datetime(2026, 9, 18, 3, 0, 0),
+        until=datetime(2026, 9, 18, 4, 0, 0),
+    ))
+
+    assert "no-runs-matched" not in codes(result)
+
+
+def test_a_log_nothing_parsed_from_is_not_charged_twice(tmp_path):
+    """``no-log-lines`` already covers a log that was not understood at all.
+
+    Both warnings describe the same scan there, and only one of them is about
+    something the caller can fix, so the specific one is left to say it.
+    """
+    crontab_file = tmp_path / "root"
+    crontab_file.write_text("*/10 * * * * /usr/local/bin/poll.sh\n")
+    log = tmp_path / "access.log"
+    log.write_text(FOREIGN_LOG)
+
+    result = scan(ScanOptions(
+        crontab_paths=[crontab_file], log_paths=[log], now=NOW,
+        since=datetime(2026, 9, 18, 3, 0, 0),
+        until=datetime(2026, 9, 18, 4, 0, 0),
+    ))
+
+    assert codes(result) == ["no-log-lines"]
