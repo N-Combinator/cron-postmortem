@@ -77,8 +77,8 @@ $ journalctl --since "24 hours ago" -o short-iso -u backup-db.service >> cron.lo
 | Option | Meaning |
 | --- | --- |
 | `--crontab PATH` | Crontab file to analyse (repeatable). Whether it carries a user column is detected from its **contents** (see below); a user-format file is attributed to `root` unless the filename is a bare username. |
-| `--crontab-format {auto,user,system}` | Force whether crontabs carry a user column, overriding the detection. |
-| `--crontab-user USER` | User to attribute user-format entries to, overriding the filename. Naming a user also says the file has no user column, so it settles a format the contents cannot (see below). |
+| `--crontab-format {auto,user,system}` | Force whether crontabs carry a user column, overriding the detection — and the format `--discover` reads off the location. |
+| `--crontab-user USER` | User to attribute user-format entries to, overriding the filename. Applies to the files given with `--crontab`: a discovered file carries its own owner. Naming a user also says the file has no user column, so it settles a format the contents cannot (see below). |
 | `--systemctl-show PATH` | Captured `systemctl show <units>` output (repeatable). |
 | `--log-file PATH` | syslog or `journalctl` output (repeatable). |
 | `--journal` / `--discover` | Read logs / schedules from this host. |
@@ -113,6 +113,7 @@ not for a warning that exits `2` or `3`.
 | `no-log-lines` | No log source was given, or nothing in it parsed as a cron/systemd log line — check the format and the syslog identifier. | `1` |
 | `unsupported-timezone` | An `OnCalendar=` value names a timezone (see the limitations); that timer is excluded from missed-run detection. | `1` |
 | `no-runs-matched` | The log is full of cron runs and not one of them belongs to a crontab entry — usually a misread crontab format or user (see below), or a log from another host. | `3` / `1` |
+| `crontab-format-guessed` | One crontab whose format the entries did not settle between them matched none of the log's cron runs, while the rest of the scan did match — the missed runs reported for it may be an artefact of the reading. | `1` |
 | `implausible-log-dates` | A year-less syslog source was dated across more than 300 days with fewer lines than that span has days — the inferred years are probably wrong. | `1` |
 | `empty-window` | The tolerance is longer than the window it applies to, so no scheduled run could be judged. | `2` / `1` |
 
@@ -155,6 +156,17 @@ named after the capture (`web01.crontab`, `root.txt`) rather than after its owne
 the name is only taken as the owner for the files found in a spool directory, where cron
 itself reads it that way. Pass `--crontab-user` when the entries belong to somebody
 else; a diagnostic names the user that was picked whenever the filename was not used.
+
+`crontab-format-guessed` covers the half `no-runs-matched` cannot see. When one
+crontab of several is misread the scan still matches the others, so the all-or-nothing
+test never fires and the misread file's entries come back as an ordinary-looking page of
+missed runs. When the format of that file had to be *guessed* — its entries did not
+settle it between them, or its user column was believed on repetition alone — and not
+one of its entries matched a cron run in a log that is carrying them, the guess is a
+likelier explanation than an outage, so it is said out loud on stderr and in the report
+rather than left as a diagnostic under the findings it invented. It exits `1`: there is
+a real report here, and part of it may be an artefact. A guess that matched its runs is
+not warned about — it was right, and the scan is clean.
 
 The summary line `Log lines read N, understood M` (`log_lines_total` /
 `log_lines_parsed` in JSON) is there for the in-between case: a log source that is only
@@ -279,7 +291,7 @@ field 6; a per-user crontab (`crontab -l`, the spool) starts the command there. 
 that wrong turns `root /usr/bin/x` into a command no log line can ever say, so every
 occurrence of every entry comes back missed — a wrong answer shaped like a finding.
 
-The **contents** decide, not the path. The files this tool is actually handed are
+The **contents** decide, not the path, for every file you name. Those files are
 captures — `web01.crontab`, `crontab.txt`, `etc-crontab` — and their names say nothing
 about what is inside them. Every entry votes on what sits in field 6 (field 2 after an
 `@macro`) and the majority decides the whole file, since cron applies one format per
@@ -300,7 +312,7 @@ file rather than one per line:
   once the rest of the file backs it up — another entry names an account outright, or
   the very same word sits in field 6 of a second entry, which is what a user column does
   and what a list of different commands does not. A file read as system format on
-  repetition alone is reported as a parse problem naming the word it believed.
+  repetition alone is reported as a parse problem naming the word or words it believed.
 - **abstain** — neither shape fits. `*/5 * * * * backup archive` is the honest case:
   `backup` is both a stock account and a plausible script name, and nothing in the line
   can tell them apart.
@@ -322,9 +334,18 @@ it. Where the entries do name an account the file wins and the report says the
 name they passed is nowhere in the output. `--crontab-format user|system` settles the
 format outright and stops the detection from running at all.
 
-The filename still decides one thing, and only one: who owns a *user*-format file. That
-is a separate question from the format, and it is answered in the warnings section
-above.
+The filename of a file you pass decides one thing, and only one: who owns a
+*user*-format file. That is a separate question from the format, and it is answered in
+the warnings section above.
+
+**`--discover` is the exception, and only there.** A file this tool finds itself is not
+a capture: cron reads `/etc/crontab` and `/etc/cron.d/*` with a user column and a spool
+file as the crontab of the user it is named after, and that is cron's own rule for the
+location rather than a guess about a filename. Discovery therefore passes the format and
+the owner it knows, and the vote above is not taken — a drop-in whose only entry is
+`*/1 * * * * deploy /opt/app/tick` is a system crontab no matter how that line reads on
+its own. `--crontab-format` overrides the location too, and since the location also
+names the owner, `--crontab-user` is applied only to the files given with `--crontab`.
 
 Supported log formats: traditional syslog (`Sep 18 03:00:01 host CRON[1234]: ...`) and
 the journalctl renderings `short-iso`, `short-iso-precise` and `short-full`. Traditional
